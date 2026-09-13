@@ -1,0 +1,25 @@
+title: "CLOS testbed (4 routers)"
+direction: right
+
+tenant-a: "tenant-a\n10.0.1.0/24" { shape: cloud; style.fill: "#e0f2fe"; style.stroke: "#0284c7" }
+tenant-b: "tenant-b\n10.0.2.0/24" { shape: cloud; style.fill: "#e0f2fe"; style.stroke: "#0284c7" }
+tenant-c: "tenant-c\n10.0.3.0/24" { shape: cloud; style.fill: "#e0f2fe"; style.stroke: "#0284c7" }
+
+leaf-a: "leaf-a" { shape: rectangle; style.fill: "#dbeafe"; style.stroke: "#2563eb" }
+leaf-b: "leaf-b" { shape: rectangle; style.fill: "#dbeafe"; style.stroke: "#2563eb" }
+
+spine-1: "spine-1" { shape: hexagon; style.fill: "#fee2e2"; style.stroke: "#dc2626" }
+spine-2: "spine-2" { shape: hexagon; style.fill: "#fee2e2"; style.stroke: "#dc2626" }
+
+blackhole: "Null0 blackhole\n10.0.99.0/24" { shape: cylinder; style.fill: "#fecaca"; style.stroke: "#b91c1c" }
+
+tenant-a -> leaf-a: "Gi0/0  10.0.1.1/24"
+tenant-b -> leaf-b: "Gi0/0  10.0.2.1/24"
+tenant-c -> leaf-b: "Gi0/2  10.0.3.1/24"
+
+leaf-a -> spine-1: "10.0.13.0/30" { style.stroke: "#16a34a" }
+leaf-a -> spine-2: "10.0.14.0/30" { style.stroke: "#16a34a" }
+leaf-b -> spine-1: "10.0.23.0/30" { style.stroke: "#16a34a" }
+leaf-b -> spine-2: "10.0.24.0/30" { style.stroke: "#16a34a" }
+
+leaf-a -> blackhole: "ip route ... Null0" { style.stroke-dash: 4; style.stroke: "#dc2626"; style.font-color: "#b91c1c" }

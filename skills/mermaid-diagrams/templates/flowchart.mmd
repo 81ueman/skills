@@ -1,0 +1,12 @@
+flowchart LR
+  A[Start] --> B{OK?}
+  B -->|yes| C[(DB)]
+  B -->|no| D([End])
+  subgraph G[Group]
+    direction TB
+    C --> D
+  end
+  classDef hi fill:#dbeafe,stroke:#2563eb
+  class A hi
+  style B fill:#fee2e2
+  linkStyle 0 stroke:#f00,stroke-width:2px

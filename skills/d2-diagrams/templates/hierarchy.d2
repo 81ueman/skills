@@ -1,0 +1,26 @@
+direction: down
+
+edge: {
+  label: "Edge"
+  lb: "LB" { shape: hexagon }
+  waf: WAF
+}
+
+app: {
+  label: "App tier"
+  a1: app-1
+  a2: app-2
+}
+
+data: {
+  label: "Data tier"
+  db: Database { shape: cylinder }
+  cache: Cache { shape: queue }
+}
+
+edge.lb -> app.a1
+edge.lb -> app.a2
+app.a1 -> data.db
+app.a1 -> data.cache
+app.a2 -> data.db
+app.a2 -> data.cache

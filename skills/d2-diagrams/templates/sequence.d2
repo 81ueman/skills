@@ -1,0 +1,7 @@
+seq: {
+  shape: sequence_diagram
+  client -> server: request
+  server -> db: query
+  db -> server: rows
+  server -> client: response
+}

@@ -1,0 +1,15 @@
+users: {
+  shape: sql_table
+  id: int { constraint: primary_key }
+  name: varchar
+  email: varchar
+}
+
+orders: {
+  shape: sql_table
+  id: int { constraint: primary_key }
+  user_id: int { constraint: foreign_key }
+  total: decimal
+}
+
+users.id -> orders.user_id: places

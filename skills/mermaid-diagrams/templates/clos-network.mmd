@@ -1,0 +1,31 @@
+---
+title: CLOS testbed (4 routers)
+---
+flowchart LR
+  ta["tenant-a<br/>10.0.1.0/24"]:::tenant
+  tb["tenant-b<br/>10.0.2.0/24"]:::tenant
+  tc["tenant-c<br/>10.0.3.0/24"]:::tenant
+
+  la["leaf-a"]:::leaf
+  lb["leaf-b"]:::leaf
+
+  s1{{"spine-1"}}:::spine
+  s2{{"spine-2"}}:::spine
+
+  bh[("Null0 blackhole<br/>10.0.99.0/24")]:::bh
+
+  ta -->|"Gi0/0 10.0.1.1/24"| la
+  tb -->|"Gi0/0 10.0.2.1/24"| lb
+  tc -->|"Gi0/2 10.0.3.1/24"| lb
+
+  la -->|"10.0.13.0/30"| s1
+  la -->|"10.0.14.0/30"| s2
+  lb -->|"10.0.23.0/30"| s1
+  lb -->|"10.0.24.0/30"| s2
+
+  la -.->|"ip route ... Null0"| bh
+
+  classDef tenant fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e
+  classDef leaf fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+  classDef spine fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+  classDef bh fill:#fecaca,stroke:#b91c1c,color:#7f1d1d

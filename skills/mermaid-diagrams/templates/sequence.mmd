@@ -1,0 +1,17 @@
+sequenceDiagram
+  autonumber
+  participant A as Alice
+  actor B as Bob
+  A->>B: request
+  activate B
+  B-->>A: response
+  deactivate B
+  loop retry
+    A->>B: ping
+  end
+  alt ok
+    B-->>A: 200
+  else fail
+    B-->>A: 500
+  end
+  Note over A,B: note text

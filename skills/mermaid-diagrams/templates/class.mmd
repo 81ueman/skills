@@ -1,0 +1,12 @@
+classDiagram
+  direction LR
+  class Animal {
+    +String name
+    -int age
+    +makeSound() void
+  }
+  class Dog
+  Animal <|-- Dog
+  Animal *-- Leg
+  Animal o-- Owner
+  Animal --> Owner : has

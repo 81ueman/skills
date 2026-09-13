@@ -1,0 +1,28 @@
+# shape / style / class / vars のショーケース
+direction: right
+
+vars: {
+  accent: "#2563eb"
+  tint: "#dbeafe"
+}
+
+classes: {
+  router: { shape: hexagon; style.fill: "#fee2e2"; style.stroke: "#dc2626" }
+  tenant: { shape: cloud; style.fill: "#e0f2fe"; style.stroke: "#0284c7" }
+}
+
+r1: r1 { class: router }
+r2: r2 { class: router }
+t1: tenant-a { class: tenant }
+
+t1 -> r1
+r1 <-> r2
+
+box: styled {
+  style.fill: ${tint}
+  style.stroke: ${accent}
+  style.stroke-width: 3
+  style.stroke-dash: 4
+  style.font-color: "#1e3a8a"
+  style.bold: true
+}
