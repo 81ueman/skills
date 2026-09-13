@@ -88,20 +88,21 @@ api -> db: SQL
 - 指定方法は `--layout` のほか `D2_LAYOUT` 環境変数、ソース中の `vars.d2-config.layout-engine` でも可
 - 詳細な比較（公式の長所短所・機能対応表・図タイプ別の早見表）: [`references/layout-engines.md`](references/layout-engines.md)
 
-ASCII の幅・高さはエンジンと `--ascii-mode` で変わる（例: `clos.d2` を `--ascii-mode standard` で描くと `elk` 138×27 / `tala` 96×35。既定の `extended` では `elk` 268×27 / `tala` 198×35）。
-ターミナルに収めたいときは `--ascii-mode`（約2倍変わる）と `--pad 0` で調整する。
+ASCII の表示寸法（桁×行）はエンジンで変わるが、`--ascii-mode` では変わらない（`clos.d2`: `dagre`/`elk` 138×27、`tala` 96×35。`extended` になるのは罫線文字だけで桁・行は同じ）。
+**`--pad` も `--scale` も ASCII には効かない**（縮めたいときは図自体を小さくするしかない）。
+また `dagre` と `elk` の ASCII はバイト単位で同一になることが多い。エンジンの違いは ASCII では判断できないので SVG/PNG で確認する。
 
 ## ターミナル / ASCII
 
 ```sh
-# Unicode 罫線（推奨）
-d2 --layout tala --ascii-mode extended --pad 0 --stdout-format ascii in.d2 -
+# Unicode 罫線（既定）
+d2 --layout tala --stdout-format ascii in.d2 -
 
-# 純 ASCII（+ - | > のみ）
-d2 --layout tala --ascii-mode standard --pad 0 --stdout-format ascii in.d2 -
+# 純 ASCII
+d2 --layout tala --ascii-mode standard --stdout-format ascii in.d2 -
 ```
 
-`--ascii-mode`: `extended`（既定、罫線あり）/ `standard`（純 ASCII）。`.txt` 出力でも ASCII になる。
+`--ascii-mode`: `extended`（既定、罫線）/ `standard`（ASCII 文字のみ）。変わるのは使う文字だけで、桁・行は同じ。`.txt` 出力でも ASCII になる。
 
 ## 画像として確認
 
@@ -117,7 +118,9 @@ open -a Preview out.png        # macOS
 - watch は既定でブラウザを開く。開きたくないなら `--browser 0`
 - 変数は `$name` ではなく `vars: { name: ... }` + `${name}`
 - `image` shape は `icon` が必須で、ホスト型アイコンは要ネットワーク
-- 大きい図は `--pad`・レイアウト・`--scale` で調整（PNG は 32768px 上限）
+- レイアウト専用属性は未対応エンジンで**コンパイルエラー**になる（shape への `near`・`top`/`left` は dagre/elk で失敗、祖先→子孫は dagre で失敗）。コンテナごとの `direction` は dagre/elk で**無言で無視**される。`d2 validate` も `--check` も検出しない（`--check` は既定 dagre で評価するので `--check --layout tala` と合わせる）
+- 大きい図は `--pad`・`--scale` で調整（PNG は 32768px 上限）。ただし **ASCII には `--pad`/`--scale`/`--ascii-mode` のいずれも寸法を変えない**
+- `tala` は 100 ノード前後で配線の作業上限に達し**失敗**することがある（`work limit exceeded`。上限を上げるフラグはない）。大きい図は dagre/elk
 
 ## 参考
 

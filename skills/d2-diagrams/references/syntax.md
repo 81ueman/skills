@@ -22,7 +22,7 @@ e: |md
 ```
 
 - id に使えるのは英数字・`_`。ラベルに空白/記号があるなら引用
-- `direction: right` をトップかコンテナ内に書くとレイアウト方向が変わる
+- `direction: right` で方向を変えられる。トップレベルは全エンジン共通だが、**コンテナごとの direction は tala のみ**（dagre/elk は無言で無視）
 
 ## shape
 
@@ -82,6 +82,18 @@ outer: {
 a.b -> a.c
 ```
 
+### タイトルとコンテナの表示名
+
+```d2
+title: "システム構成"        # 図全体のタイトル
+
+group: My group {            # コンテナの表示名（ラベル）
+  a -> b
+}
+```
+
+> `title:` は ASCII 出力だと最上部のノードに重なって見えることがある。気になるときは SVG/PNG で確認する。
+
 ## スタイル
 
 ```d2
@@ -125,16 +137,35 @@ n: n { style.fill: ${blue} }
 ## レイアウト補助
 
 ```d2
+# グリッド配置（全エンジン）
 g: {
   grid-rows: 2
   grid-columns: 2
   a; b
   c; d
 }
+```
 
-n1: near n2
+位置固定と `near`（**tala のみ**。dagre/elk ではコンパイルエラー）:
+
+```d2
+# 座標を固定（top と left は必ず両方セット。片方だけだとエラー）
+pinned: { top: 100; left: 100 }
+auto: other
+
+# 別の図形の近くに置く（near はオブジェクト指定）
+n1: { near: n2 }
 n2: other
 ```
+
+`near` は定数でも指定でき、こちらは全エンジン共通:
+
+```d2
+n3: { near: top-center }
+```
+
+> **`n1: near n2` は誤り。** D2 はラベルが `near n2` のノードを作るだけで、near 関係にはならない。属性として `n1: { near: n2 }` と書く。
+> `near` はノード（オブジェクト）に対してのみ有効。エッジに書いても効果はない。
 
 ## tooltip / link
 
@@ -177,16 +208,19 @@ mine: x -> base
 
 ```sh
 # Unicode 罫線
-d2 --layout tala --ascii-mode extended --pad 0 --stdout-format ascii in.d2 -
+d2 --layout tala --ascii-mode extended --stdout-format ascii in.d2 -
 
 # 純 ASCII
-d2 --layout tala --ascii-mode standard --pad 0 --stdout-format ascii in.d2 -
+d2 --layout tala --ascii-mode standard --stdout-format ascii in.d2 -
 
 # ファイルへ
 d2 --layout elk in.d2 out.txt
 ```
 
-`--ascii-mode`: `extended`（既定、罫線あり）/ `standard`（`+ - | >` のみ）。
+- `--ascii-mode`: `extended`（既定、罫線あり）/ `standard`（ASCII 文字のみ。`+ - | >` のほか `/ \ _ ( ) x` なども使う）
+- `--ascii-mode` で変わるのは**使う文字だけ**。桁・行（表示寸法）は standard と extended で同じ
+- ASCII は `--pad` も `--scale` も**効かない**（小さくしたいなら図自体を小さくする）
+- `dagre` と `elk` の ASCII はバイト単位で同一になることが多い。ASCII ではエンジン差を判断できないので SVG/PNG で確認する
 
 ### ペインでライブ表示する小さなラッパ
 
@@ -198,7 +232,7 @@ while true; do
   now=$(stat -f %m "$src" 2>/dev/null || stat -c %Y "$src")
   if [ "$now" != "$last" ]; then
     last="$now"
-    d2 --layout tala --ascii-mode extended --pad 0 --stdout-format ascii "$src" - > "$out"
+    d2 --layout tala --ascii-mode extended --stdout-format ascii "$src" - > "$out"
     printf '\033[2J\033[H'; cat "$out"
   fi
   sleep 1
