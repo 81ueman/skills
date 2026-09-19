@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# coord - task ledger + completion channel for Herdr multi-agent coordination.
+#
+# Design: filesystem is the source of truth (/tmp/coord/<task>/spec.json +
+# result.json). No MARK string scraping. Child reports via `coord done`,
+# parent waits via `coord wait` (result file + agent settled + optional
+# verify hook). Parallel = multiple tasks + `coord wait-all`.
+#
+# Usage:
+#   coord new --pane <pane> [--kind agent|cmd] [--about "summary"] -- <instruction...>
+#   coord prompt <task> [--timeout-ms N]
+#   coord done <task> --status ok|fail --summary "..." [--commit SHA] [--detail FILE]
+#   coord wait <task> [--timeout SEC] [--no-agent-check]
+#   coord wait-all [--timeout SEC] <task>...
+#   coord list
+#   coord retry <task>
+#   coord show <task>
+#
+# Env: COORD_DIR (default /tmp/coord). Exit codes: 0 ok/completed,
+# 1 task failed (done --status fail), 2 timeout/not-found/usage error.
+set -euo pipefail
+
+COORD_DIR="${COORD_DIR:-/tmp/coord}"
+COORD_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
+usage() { sed -n '2,20p' "$0" >&2; exit 2; }
+
+_task_dir() { echo "$COORD_DIR/$1"; }
+_now() { date -u +%FT%TZ; }
+
+jwrite() { python3 -c 'import json,sys; json.dump(json.load(sys.stdin), open(sys.argv[1],"w"), indent=2, ensure_ascii=False)' "$1"; }
+jget() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],""))' "$1" "$2"; }
+
+cmd_new() {
+  local pane="" kind="agent" about=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --pane) pane="$2"; shift 2;;
+    --kind) kind="$2"; shift 2;;
+    --about) about="$2"; shift 2;;
+    --) shift; break;;
+    *) break;;
+  esac; done
+  [ -n "$pane" ] || { echo "coord new: --pane required" >&2; exit 2; }
+  [ $# -gt 0 ] || { echo "coord new: instruction required after --" >&2; exit 2; }
+  local instruction="$*"
+  local task; task="$(uuidgen | tr -d '-' | cut -c1-12 | tr 'A-Z' 'a-z')"
+  local dir; dir="$(_task_dir "$task")"
+  mkdir -p "$dir/attempts"
+  python3 - "$dir/spec.json" "$task" "$pane" "$kind" "$about" "$instruction" <<'EOF'
+import json,sys
+_, path, task, pane, kind, about, instruction = sys.argv
+json.dump({"task":task,"pane":pane,"kind":kind,"about":about,
+           "instruction":instruction,"status":"pending",
+           "created_at":__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+           "attempt":1}, open(path,"w"), indent=2, ensure_ascii=False)
+EOF
+  echo "$task"
+}
+
+cmd_prompt() {
+  local task="${1:?usage: coord prompt <task>}"; shift || true
+  local timeout_ms="120000"
+  while [ $# -gt 0 ]; do case "$1" in
+    --timeout-ms) timeout_ms="$2"; shift 2;;
+    *) break;;
+  esac; done
+  local dir; dir="$(_task_dir "$task")"
+  [ -f "$dir/spec.json" ] || { echo "coord prompt: unknown task $task" >&2; exit 2; }
+  local pane instruction
+  pane="$(jget "$dir/spec.json" pane)"
+  instruction="$(jget "$dir/spec.json" instruction)"
+  local body="COORD_TASK=$task COORD_BIN=$COORD_SELF
+作業: $instruction
+完了報告の契約: 終了時に必ず「$COORD_SELF done $task --status ok --summary 一行要約 [--commit SHA]」を実行せよ。失敗時は --status fail で理由を書け。完了宣言のechoやMARK文字列は不要・禁止。ファイル・報告はresult.jsonが正本。"
+  local out
+  out="$(herdr agent prompt "$pane" "$body" 2>&1)" || { echo "$out" >&2; exit 2; }
+  python3 - "$dir/spec.json" <<'EOF'
+import json,sys,datetime
+path=sys.argv[1]
+spec=json.load(open(path))
+spec["status"]="working"
+spec["prompted_at"]=datetime.datetime.now(datetime.timezone.utc).isoformat()
+json.dump(spec, open(path,"w"), indent=2, ensure_ascii=False)
+EOF
+  # confirm receipt: agent leaves idle within ~15s
+  local deadline=$((SECONDS+15)) st=""
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    st="$(herdr agent get "$pane" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["agent"].get("agent_status",""))' 2>/dev/null || echo "")"
+    [ "$st" = "working" ] && break
+    sleep 1
+  done
+  echo "PROMPTED task=$task pane=$pane agent_status=${st:-unknown}"
+  [ "$st" = "working" ] || echo "WARN: agent not working after 15s (status=$st). Check pane." >&2
+}
+
+cmd_done() {
+  local task="${1:?usage: coord done <task>}"; shift || true
+  local status="" summary="" commit="" detail=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --status) status="$2"; shift 2;;
+    --summary) summary="$2"; shift 2;;
+    --commit) commit="$2"; shift 2;;
+    --detail) detail="$2"; shift 2;;
+    *) break;;
+  esac; done
+  local dir; dir="$(_task_dir "$task")"
+  [ -f "$dir/spec.json" ] || { echo "coord done: unknown task $task" >&2; exit 2; }
+  case "$status" in ok|fail) ;; *) echo "coord done: --status ok|fail required" >&2; exit 2;; esac
+  [ -n "$summary" ] || { echo "coord done: --summary required" >&2; exit 2; }
+  local detail_text=""
+  [ -n "$detail" ] && [ -f "$detail" ] && detail_text="$(cat "$detail")"
+  python3 - "$dir/result.json" "$task" "$status" "$summary" "$commit" "$detail_text" <<'EOF'
+import json,sys,datetime,os
+_, path, task, status, summary, commit, detail = sys.argv
+pane = os.environ.get("HERDR_PANE_ID","")
+json.dump({"task":task,"status":status,"summary":summary,"commit":commit,
+           "detail":detail,"pane":pane,
+           "reported_at":datetime.datetime.now(datetime.timezone.utc).isoformat()},
+          open(path,"w"), indent=2, ensure_ascii=False)
+EOF
+  python3 - "$dir/spec.json" "$status" <<'EOF'
+import json,sys
+path, status = sys.argv[1], sys.argv[2]
+spec=json.load(open(path))
+spec["status"]="done" if status=="ok" else "failed"
+json.dump(spec, open(path,"w"), indent=2, ensure_ascii=False)
+EOF
+  echo "RECORDED task=$task status=$status"
+}
+
+cmd_wait() {
+  local task="${1:?usage: coord wait <task>}"; shift || true
+  local timeout=600 check_agent=1
+  while [ $# -gt 0 ]; do case "$1" in
+    --timeout) timeout="$2"; shift 2;;
+    --no-agent-check) check_agent=0; shift;;
+    *) break;;
+  esac; done
+  local dir; dir="$(_task_dir "$task")"
+  [ -f "$dir/spec.json" ] || { echo "coord wait: unknown task $task" >&2; exit 2; }
+  local end=$((SECONDS+timeout)) result=""
+  while [ "$SECONDS" -lt "$end" ]; do
+    if [ -s "$dir/result.json" ]; then
+      result="$(jget "$dir/result.json" status)"
+      [ -n "$result" ] && break
+    fi
+    sleep 2
+  done
+  if [ -z "$result" ]; then echo "TIMEOUT task=$task after ${timeout}s" >&2; return 2; fi
+  local summary; summary="$(jget "$dir/result.json" summary)"
+  if [ "$check_agent" = 1 ]; then
+    local pane; pane="$(jget "$dir/spec.json" pane)"
+    local st; st="$(herdr agent get "$pane" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["agent"].get("agent_status","unknown"))' 2>/dev/null || echo unknown)"
+    echo "WAIT-OK task=$task result=$result agent=$st summary=$summary"
+  else
+    echo "WAIT-OK task=$task result=$result summary=$summary"
+  fi
+  herdr notification show "coord: $task $result" --body "$summary" >/dev/null 2>&1 || true
+  [ "$result" = "ok" ]
+}
+
+cmd_wait_all() {
+  local timeout=900
+  while [ $# -gt 0 ]; do case "$1" in
+    --timeout) timeout="$2"; shift 2;;
+    *) break;;
+  esac; done
+  [ $# -gt 0 ] || { echo "usage: coord wait-all [--timeout SEC] <task>..." >&2; exit 2; }
+  local end=$((SECONDS+timeout)) pending=() failed=0
+  while :; do
+    pending=()
+    for t in "$@"; do
+      local dir; dir="$(_task_dir "$t")"
+      if [ -s "$dir/result.json" ]; then
+        local r; r="$(jget "$dir/result.json" status)"
+        [ -n "$r" ] || pending+=("$t")
+      else
+        pending+=("$t")
+      fi
+    done
+    [ "${#pending[@]}" -eq 0 ] && break
+    [ "$SECONDS" -ge "$end" ] && { echo "TIMEOUT pending: ${pending[*]}" >&2; return 2; }
+    sleep 3
+  done
+  for t in "$@"; do
+    local r s; r="$(jget "$(_task_dir "$t")/result.json" status)"; s="$(jget "$(_task_dir "$t")/result.json" summary)"
+    echo "TASK $t result=$r summary=$s"
+    [ "$r" = "ok" ] || failed=1
+  done
+  herdr notification show "coord: wait-all done ($# tasks)" >/dev/null 2>&1 || true
+  return "$failed"
+}
+
+cmd_list() {
+  for d in "$COORD_DIR"/*/spec.json; do
+    [ -f "$d" ] || continue
+    python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); print(s["task"], s.get("status","?"), s.get("pane","?"), (s.get("about") or "")[:60])' "$d"
+  done
+}
+
+cmd_show() {
+  local task="${1:?usage: coord show <task>}"
+  local dir; dir="$(_task_dir "$task")"
+  echo "== spec =="; cat "$dir/spec.json" 2>/dev/null
+  echo; echo "== result =="; cat "$dir/result.json" 2>/dev/null || echo "(no result yet)"
+}
+
+cmd_retry() {
+  local task="${1:?usage: coord retry <task>}"
+  local dir; dir="$(_task_dir "$task")"
+  [ -f "$dir/spec.json" ] || { echo "coord retry: unknown task $task" >&2; exit 2; }
+  local n; n="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("attempt",1))' "$dir/spec.json")"
+  mkdir -p "$dir/attempts/$n"
+  [ -f "$dir/result.json" ] && mv "$dir/result.json" "$dir/attempts/$n/"
+  python3 - "$dir/spec.json" <<'EOF'
+import json,sys,datetime
+path=sys.argv[1]
+spec=json.load(open(path))
+spec["attempt"]=spec.get("attempt",1)+1
+spec["status"]="pending"
+spec["prompted_at"]=datetime.datetime.now(datetime.timezone.utc).isoformat()
+json.dump(spec, open(path,"w"), indent=2, ensure_ascii=False)
+EOF
+  echo "RETRY-READY task=$task attempt=$((n+1)) (re-run: coord prompt $task)"
+}
+
+cmd="${1:-}"; shift 2>/dev/null || usage
+case "$cmd" in
+  new) cmd_new "$@";; prompt) cmd_prompt "$@";; done) cmd_done "$@";;
+  fail) cmd_done "$1" --status fail "${@:2}";;
+  wait) cmd_wait "$@";; wait-all) cmd_wait_all "$@";;
+  list) cmd_list;; show) cmd_show "$@";; retry) cmd_retry "$@";;
+  *) usage;;
+esac
