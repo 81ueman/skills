@@ -71,7 +71,7 @@ cmd_prompt() {
   instruction="$(jget "$dir/spec.json" instruction)"
   local body="COORD_TASK=$task COORD_BIN=$COORD_SELF
 作業: $instruction
-完了報告の契約: 終了時に必ず「$COORD_SELF done $task --status ok --summary 一行要約 [--commit SHA]」を実行せよ。失敗時は --status fail で理由を書け。完了宣言のechoやMARK文字列は不要・禁止。ファイル・報告はresult.jsonが正本。"
+完了報告の契約: 進められる間は止まらず進め続け、区切りがついたら必ず「$COORD_SELF done $task --status ok --summary 一行要約 [--commit SHA]」を実行せよ。doneなし停止は禁止。進められない場合（質問・承認待ち・ブロッカー）は無言停止せず必ず「$COORD_SELF done $task --status fail --summary 理由と必要な入力」を実行せよ。完了宣言のechoやMARK文字列は不要・禁止。ファイル・報告はresult.jsonが正本。"
   local out
   out="$(herdr agent prompt "$pane" "$body" 2>&1)" || { echo "$out" >&2; exit 2; }
   python3 - "$dir/spec.json" <<'EOF'
