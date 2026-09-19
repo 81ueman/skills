@@ -33,6 +33,7 @@ Herdr上の複数エージェントpane間で、指示・仲裁・完了検知�
 | pane出力の特定文字列で完了を知りたい | `herdr pane wait-output --source recent-unwrapped --lines N --timeout <MS> --match <TEXT> <paneID>` をbackground実行する。`--timeout` 必須 |
 | 指示文自体がマーカー文字列を含む | そのマーカーへの待機は即時誤発火する。待機開始→指示の順にし、指示文にはマーカーを断片記述のみにする（例：「第1片 P03、第2片 DONE、ハイフン連結」）。それでも復唱リスクがあるためworktree方式を優先する |
 | エージェントの生死・状態遷移を待ちたい | `herdr agent wait <paneID> --until idle|done|blocked --timeout <MS>`。`--until`省略時はidle/done/blockedにマッチ |
+| 検証マイルストーンの着地（commit記録運用）を見逃したくない | `scripts/head-watch.sh <repo> [interval] [timeout]` をbackground実行する。HEAD移動時のみ発火し、新commit一覧を出す。pane文字列マッチより誤発火が少ない |
 | 担当境界を跨ぐ判断 | 推測で確定しない。各担当に直接確認し、食い違いは契約文書を優先、小さなRFCに切る |
 | 順序拘束が必要 | binding orderを明示し、飛ばし禁止を宣言する（例：P0-1→P0-2→P0-3）。ゲート開放条件も同時に宣言する |
 
