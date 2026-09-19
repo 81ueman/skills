@@ -9,12 +9,17 @@
 
 ```
 skills/
+  agent-coordination/   Herdr上の複数エージェント間で指示・仲裁・完了検知するスキル
   d2-diagrams/          D2（Terrastruct D2）で図を描くスキル
   diagram-tool-choice/  d2 と Mermaid のどちらを使うか判断する入口スキル
   mermaid-diagrams/     Mermaid で図を描くスキル
   skill-authoring/      新しいスキルを作成・追加する手順スキル
   voice-check/          音声入力の文字起こしを日本語として整形・確認するスキル
 ```
+
+| スキル | 説明 |
+| --- | --- |
+| `agent-coordination` | Herdrの別paneエージェントへの直接指示・仲裁・バックグラウンド完了検知 |
 
 | スキル | 説明 |
 | --- | --- |
@@ -34,7 +39,7 @@ skills/
 REPO="$HOME/ghq/github.com/81ueman/skills"   # このリポジトリのパスに合わせる
 
 mkdir -p "$HOME/.agents/skills"
-for s in d2-diagrams diagram-tool-choice mermaid-diagrams skill-authoring voice-check; do
+for s in agent-coordination d2-diagrams diagram-tool-choice mermaid-diagrams skill-authoring voice-check; do
   rm -rf "$HOME/.agents/skills/$s"
   ln -s "$REPO/skills/$s" "$HOME/.agents/skills/$s"
 done
@@ -44,7 +49,7 @@ OpenCode は `~/.agents/`・`~/.claude/`・`~/.config/opencode/` のスキルを
 上記リンクだけで認識される。Claude Code からも使いたい場合は `~/.claude/skills/` にも同様に貼る。
 
 ```sh
-for s in d2-diagrams diagram-tool-choice mermaid-diagrams skill-authoring voice-check; do
+for s in agent-coordination d2-diagrams diagram-tool-choice mermaid-diagrams skill-authoring voice-check; do
   rm -rf "$HOME/.claude/skills/$s"
   ln -s "$REPO/skills/$s" "$HOME/.claude/skills/$s"
 done
