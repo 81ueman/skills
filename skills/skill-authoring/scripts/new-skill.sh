@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# 新しい Agent Skill の雛形を作成し、~/.agents/skills にシンボリックリンクする。
+# 新しい Agent Skill の雛形を管理リポジトリに作成する。
 #
 # 使い方:
 #   new-skill.sh <skill-name>
+#
+# 配備は APM が行う（commit/push 後に `apm update -g`）。
 
 set -euo pipefail
 
@@ -36,18 +38,10 @@ fi
 mkdir -p "$dest"
 sed "s/^name: .*/name: $name/" "$template" > "$dest/SKILL.md"
 
-mkdir -p "$HOME/.agents/skills"
-link="$HOME/.agents/skills/$name"
-if [ -e "$link" ] || [ -L "$link" ]; then
-  echo "warn: リンク先が既に存在するため作成をスキップ: $link" >&2
-else
-  ln -s "$dest" "$link"
-fi
-
 echo "created : $dest/SKILL.md"
-echo "linked  : $link -> $dest"
 echo
 echo "次の手順:"
 echo "  1. $dest/SKILL.md を編集"
 echo "  2. $repo/README.md のスキル一覧を更新"
 echo "  3. cd $repo && git add skills/$name README.md && git commit -m \"Add $name skill\" && git push"
+echo "  4. apm update -g   # ~/.agents/skills/$name に展開"

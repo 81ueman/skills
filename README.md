@@ -2,8 +2,9 @@
 
 自分で作成した Agent Skill をまとめて管理するリポジトリ。
 
-`~/.agents/skills/` などに置いたスキルの実体をここに移し、各エージェントのスキル探索ディレクトリから
-シンボリックリンクで参照する。編集は常にこのリポジトリ側で行う。
+配布・配備は [APM (Agent Package Manager)](https://microsoft.github.io/apm/) で行う。
+実体はこのリポジトリの `skills/<name>/` に置き、`apm install` で各エージェントの
+スキル探索ディレクトリへ展開する（APM はコピー配備。git ref を `~/.apm/apm.lock.yaml` に固定する）。
 
 ## 構成
 
@@ -23,52 +24,49 @@ skills/
 | `diagram-tool-choice` | 図を描く前に d2 / Mermaid を判断軸の表で選び、対応するスキルへ誘導する |
 | `d2-diagrams` | d2 の CLI、レイアウトエンジン（dagre/elk/tala）、記法、テンプレート |
 | `mermaid-diagrams` | Mermaid の CLI（mmdc / mermaid-ascii）、記法、テンプレート |
-| `skill-authoring` | 新規スキル作成の手順（実体の置き場・frontmatter・リンク・commit/push） |
+| `skill-authoring` | 新規スキル作成の手順（実体の置き場・frontmatter・APM 展開・commit/push） |
 | `voice-check` | 音声入力の崩れを検知し、自然な日本語に整えて実行前に確認する |
 
 `diagram-tool-choice` から `d2-diagrams` / `mermaid-diagrams` に分岐する 3 点セットで使う。
 
-## セットアップ
-
-スキルの実体を各エージェントの探索ディレクトリへシンボリックリンクする。
+## セットアップ（APM）
 
 ```sh
-REPO="$HOME/ghq/github.com/81ueman/skills"   # このリポジトリのパスに合わせる
-
-mkdir -p "$HOME/.agents/skills"
-for s in agent-status d2-diagrams diagram-tool-choice mermaid-diagrams skill-authoring voice-check; do
-  rm -rf "$HOME/.agents/skills/$s"
-  ln -s "$REPO/skills/$s" "$HOME/.agents/skills/$s"
-done
+brew install apm
 ```
 
-OpenCode は `~/.agents/`・`~/.claude/`・`~/.config/opencode/` のスキルを探索するため、
-上記リンクだけで認識される。Claude Code からも使いたい場合は `~/.claude/skills/` にも同様に貼る。
+このリポジトリのスキルをグローバルへ展開する。
 
 ```sh
-for s in agent-status d2-diagrams diagram-tool-choice mermaid-diagrams skill-authoring voice-check; do
-  rm -rf "$HOME/.claude/skills/$s"
-  ln -s "$REPO/skills/$s" "$HOME/.claude/skills/$s"
-done
+apm install -g --target agent-skills 81ueman/skills
+```
+
+- `~/.agents/skills/<name>/` に実体がコピーされる（`agent-skills` は Agent Skills 標準の共有ディレクトリ）
+- OpenCode は `~/.agents/skills/`（互換）・`~/.config/opencode/skills/`（ネイティブ）・`~/.claude/skills/` を探索するため、`agent-skills` だけで認識される
+- Claude Code など他のハーネスにも配る場合は target を足す（例: `--target agent-skills,claude`）
+- グローバル側の台帳は `~/.apm/apm.yml` と `~/.apm/apm.lock.yaml`
+
+更新（push 済みの最新を取り込む）:
+
+```sh
+apm update -g
 ```
 
 ## 他リポジトリが実体を持つスキル
 
-プロダクト側のリポジトリが同梱し、その README やコードから参照しているスキルは、実体を
-そのリポジトリに置いたままグローバルから**直接リンク**する。このリポジトリには取り込まない
-（クロスリポジトリの symlink をコミットすると移植できず、二重管理にもなるため）。
+プロダクト側のリポジトリが正本のスキルも、そのリポジトリの APM パッケージとして
+別途 install する。クロスリポジトリの symlink はコミットしない方針を維持する。
 
-| スキル | 実体 | 備考 |
+| スキル | 実体 | 展開 |
 | --- | --- | --- |
-| `agent-worker` | `~/ghq/github.com/81ueman/relay/.opencode/skills/agent-worker` | relay が `.opencode/skills/agent-worker/SKILL.md` を README・plugin・runtime から参照。正本は relay 側 |
-
-```sh
-RELAY="$HOME/ghq/github.com/81ueman/relay"
-ln -sfn "$RELAY/.opencode/skills/agent-worker" "$HOME/.agents/skills/agent-worker"
-```
+| `agent-worker` | `relay` リポジトリの `skills/agent-worker/` | `apm install -g --target agent-skills 81ueman/relay` |
 
 ## 外部からインストールしたスキルとの違い
 
 `~/.agents/skills/` には外部リポジトリから導入したスキルも同居している。それらは
-`~/.agents/.skill-lock.json` で管理され、更新はインストール元に従う。このリポジトリで管理するのは
-自分で作成したスキルだけとし、二重管理を避ける。
+`npx skills` と `~/.agents/.skill-lock.json` が管理し、更新はインストール元に従う。
+APM が管理するのは `~/.apm/apm.yml` に載ったスキル（自分で作成したもの＋relay）だけ。
+
+## 手順書
+
+新しいスキルの作り方は [skills/skill-authoring/](skills/skill-authoring/SKILL.md) を参照。
