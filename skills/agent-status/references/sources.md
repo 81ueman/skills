@@ -40,8 +40,9 @@
 - 追跡中の status pane（`.agent-status/status-pane`）は常に除外する。
 - **階層表示**: `workspace → tab → pane` の順にグループ化する。
   - workspace が複数あるときだけ workspace 見出しを出す。
-  - 同じ workspace 内に tab が複数あるときだけ tab 見出し（`tab_id` と label）を出す。
-  - pane 行は見出しの段数だけインデントする。1 ws・1 tab のときは見出し無しで従来どおり。
+  - tab 見出しは **その tab に pane が 2 つ以上あるときだけ**出す（`tab_id` と label）。
+  - pane が 1 つだけの tab は見出しを立てず、tab ラベルを pane 行に畳んで **1 行**にする（縦を節約）。
+  - pane 行は見出しの段数だけインデントする。
 - **Ctrl+click でその pane へ移動**: pane id を OSC8 ハイパーリンク
   `https://agent-status.local/pane/<pane_id>` で包む（`herdr.links=true` かつ TTY のときのみ）。
   [../herdr-plugin/](../herdr-plugin/) の Herdr プラグイン `agent-status.pane-links` の

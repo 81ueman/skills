@@ -96,7 +96,8 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
 - `PLAN` … plan.json の台帳。`parent` があればツリー表示。
 - `RELAY WORKERS` … `relay` の worker 状態と最終進捗からの経過時間。
 - `HERDR PANES` … `workspace → tab → pane` の階層で表示。pane ごとの `agent_status`（working/idle/blocked/unknown）、`*` はフォーカス中。
-  workspace / tab が複数あるときだけ見出し（tab はラベル付き）を出し、pane はその下にインデントされる。
+  workspace が複数あるときだけ見出しを出し、tab 見出しは pane が 2 つ以上あるときだけ。
+  pane が 1 つだけの tab は tab ラベルを pane 行に畳んで 1 行にし、縦を節約する。
   エージェントの居ない pane（シェル等）とダッシュボード自身の pane は既定で非表示（`herdr.show_shells` で表示）。
   pane id を **Ctrl+click** するとその pane にフォーカスが移る（要プラグイン link、`herdr.links=false` で無効化）。
   pane id はリンクとして下線付きで表示し、末尾に `Ctrl+click a pane id → focus that pane` のヒント行を出す。
