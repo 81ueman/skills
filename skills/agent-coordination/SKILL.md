@@ -8,6 +8,11 @@ description: Herdrで並列稼働する複数エージェント（別paneのcoor
 Herdr上の複数エージェントpane間で、指示・仲裁・完了検知を行う手順。
 正本はファイルシステム（`/tmp/coord/<task>/spec.json`＋`result.json`）。出力文字列マッチ（MARK）は使わない。
 
+> **廃止予定（移行中）**: 本スキルの `scripts/coord`（`/tmp/coord` の spec/result を正本とする方式）は廃止する。
+> 今後の協調・タスク台帳の正本は **relay**（`agentctl` の SQLite: `<repo>/.agentctl/state.db`）へ移行する。
+> relay 本体の CLI 名改称（`agentctl` → `relay`）の一括リネーム後に、本スキルも relay 前提へ書き換える。
+> それまでの暫定として、あたらしい協調は relay 側で始め、新規に coord を使い始めないこと。
+
 ## 概要
 
 別paneのエージェントとはユーザー経由で伝言せず、pane ID指定で直接対話する。
