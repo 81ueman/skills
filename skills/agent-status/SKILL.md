@@ -92,6 +92,37 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
 | plan の項目と relay タスクを紐付けたい | `relay task add "..." --plan <plan-id>`（起票時）/ `relay task link <task-id> <plan-id>`（後付け） |
 | タスクを進めたい | 本スキルではなく `relay next/note/submit`（`agent-worker` skill） |
 
+## 運用（PLAN と relay をずらさない）
+
+plan.json の `status` は**宣言（intent）**、表示に使う状態は relay（observed）。両者をつなぐのは
+`tasks.plan_id` だけなので、**起票側が `--plan <plan-id>` を渡す**のが運用の起点になる。
+
+1. plan.json に項目を足したら、対応する relay task は `--plan` 付きで起票する:
+
+   ```bash
+   relay task add "Rust VRF" --plan A1 --role dataplane-rust
+   ```
+
+2. 定期的に `doctor` を見て、紐付けの穴を潰す:
+
+   ```bash
+   python3 scripts/status doctor --repo "$PWD"
+   #   links         6/19 items <- relay tasks  drift=A1,A2,A5,B
+   #   unlinked      B1,B2,B3,B4  (in-flight but no relay task; shown from intent only)
+   ```
+
+   - `links` … 何項目が relay と繋がっているか。`drift` は宣言と実態が食い違う項目。
+   - `unlinked` … 「進行中」と宣言しているのに紐づくタスクが無い項目。この行の状態は plan.json を
+     書いた時点で止まる。ただし親タスク 1 本で下位項目をまとめて進めている場合、子が `unlinked` に
+     出ても実害は無い（気になるなら子にも `--plan` 付きで起票して粒度を揃える）。
+   - `unknown links` … plan.json に無い id を指しているタスク（打ち間違い）。
+
+3. 起票後に気づいたとき、plan id を変えたいときは `relay task link <task-id> <plan-id>` /
+   `relay task unlink <task-id>` で直す。
+
+ダッシュボードの `PLAN` は observed 優先なので、**plan.json の `status` を書き換えなくても表示は実態に追従**する。
+書き戻しは行わない（plan.json は人間の成果物として残す）。
+
 ## 表示の読み方
 
 - `tasks done/total [####----]` … relay の `done` 件数と全件数、プログレスバー。
