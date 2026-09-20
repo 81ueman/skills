@@ -94,7 +94,8 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
   relay の `parent_task_id` があれば親子をツリー表示（子はインデント）。
 - `DONE (n)` … 完了タスク（最新 30 件）。階層があれば同じ段でインデント表示。
 - `PLAN` … plan.json の台帳。`parent` があればツリー表示。
-- `RELAY WORKERS` … `relay` の worker 状態と最終進捗からの経過時間。
+- `RELAY WORKERS` … `relay` の worker 状態と最終進捗からの経過時間。Herdr 上の配置
+  （`worker_runtimes.workspace_id`）で workspace ごとにまとめ、workspace が複数のときだけ見出しを出す。
 - `HERDR PANES` … `workspace → tab → pane` の階層で表示。pane ごとの `agent_status`（working/idle/blocked/unknown）、`*` はフォーカス中。
   workspace が複数あるときだけ見出しを出し、tab 見出しは pane が 2 つ以上あるときだけ。
   pane が 1 つだけの tab は pane 行だけの 1 行にし、縦を節約する。

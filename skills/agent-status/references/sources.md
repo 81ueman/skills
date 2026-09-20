@@ -13,6 +13,7 @@
   | --- | --- |
   | `tasks` | `id, title, state, priority, role, assignee, parent_task_id, updated_at` |
   | `workers` | `id, role, state, current_task_id, generation, last_progress_at` |
+  | `worker_runtimes` | `worker_id, generation, created_at, workspace_id, tab_id, pane_id, runtime_id`（worker の階層表示用。古い DB に無ければ無視） |
 
 - task state: `queued running review done blocked_internal blocked_human failed`
 - worker state: `starting idle working waiting_input stalled dead`
@@ -21,6 +22,9 @@
 - 階層: `parent_task_id` があれば親子を **ツリー表示**（子は 2 スペース/段でインデント）。
   兄弟は上記の state/priority 順。親が存在しない孤児や循環参照は depth 0 に落として必ず表示する。
   `done` の子も所属段は保たれる（残り/完了のセクションをまたいでもインデントは維持）。
+- worker の階層: `workers` に親子列は無いので、**Herdr 上の配置**（`worker_runtimes` の
+  `workspace_id`、同一 worker は generation 最大→`created_at` 最新の行）で workspace ごとに
+  まとめる。workspace が複数のときだけ見出しを出し、無い worker は `-` にまとめる。
 
 将来 relay が `relay status --json` などを公開したら、それを優先する実装に差し替える。
 

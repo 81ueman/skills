@@ -254,9 +254,12 @@ def read_relay(db):
         db, "SELECT id,title,state,priority,role,assignee,parent_task_id,updated_at FROM tasks")
     workers = _sqlite_rows(
         db, "SELECT id,role,state,current_task_id,generation,last_progress_at FROM workers")
+    # Herdr placement per worker (used only for display grouping; absent on old DBs).
+    runtimes = _sqlite_rows(
+        db, "SELECT worker_id,generation,created_at,workspace_id,tab_id,pane_id,runtime_id FROM worker_runtimes")
     if tasks is None and workers is None:
         return None
-    return {"db": db, "tasks": tasks or [], "workers": workers or []}
+    return {"db": db, "tasks": tasks or [], "workers": workers or [], "runtimes": runtimes or []}
 
 
 # --------------------------------------------------------------------------- #
@@ -462,14 +465,26 @@ def collect(root, cfg, workspaces):
     workers = []
     if relay:
         now_ms = time.time() * 1000
+        # Latest runtime row per worker (highest generation, then newest created_at).
+        latest = {}
+        for r in relay.get("runtimes") or []:
+            wid = r.get("worker_id")
+            if not wid:
+                continue
+            key = (r.get("generation") or 0, r.get("created_at") or 0)
+            if wid not in latest or key > latest[wid][0]:
+                latest[wid] = (key, r)
         for w in relay["workers"]:
             lp = w.get("last_progress_at") or 0
+            rt = latest.get(w.get("id"), (None, {}))[1]
             workers.append({
                 "id": w.get("id"), "role": w.get("role"), "state": w.get("state"),
                 "task": w.get("current_task_id"), "generation": w.get("generation"),
                 "idle_ms": int(now_ms - lp) if lp else None,
+                "workspace": rt.get("workspace_id"), "tab": rt.get("tab_id"),
             })
-        workers.sort(key=lambda x: x["id"] or "")
+        # Group order = workspace, then worker id (regex-free; "~" sorts absent last).
+        workers.sort(key=lambda x: (x.get("workspace") or "~", x["id"] or ""))
 
     plan_tasks = []
     if plan:
@@ -573,10 +588,18 @@ def render_text(data, use_color, links=False):
     if data["workers"]:
         lines.append("")
         lines.append(c("RELAY WORKERS", "bold"))
+        groups = {}
         for w in data["workers"]:
-            tag = color(f"{w['state']:<14}", WORKER_COLOR.get(w["state"]), use_color)
-            lines.append(f"  {tag} {str(w['id']):<14} task={w.get('task') or '-'}  "
-                         f"gen={w.get('generation')}  last-progress {fmt_age(w.get('idle_ms'))}")
+            groups.setdefault(w.get("workspace"), []).append(w)
+        multi_ws = len(groups) > 1
+        for ws, ws_workers in groups.items():
+            if multi_ws:
+                lines.append(" " + c(ws or "-", "blue"))
+            indent = "    " if multi_ws else "  "
+            for w in ws_workers:
+                tag = color(f"{w['state']:<14}", WORKER_COLOR.get(w["state"]), use_color)
+                lines.append(f"{indent}{tag} {str(w['id']):<14} task={w.get('task') or '-'}  "
+                             f"gen={w.get('generation')}  last-progress {fmt_age(w.get('idle_ms'))}")
 
     if data["plan"]:
         lines.append("")
