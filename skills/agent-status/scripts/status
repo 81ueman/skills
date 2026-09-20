@@ -68,8 +68,10 @@ AGENT_COLOR = {
 # small utilities
 # --------------------------------------------------------------------------- #
 def run(cmd, cwd=None, timeout=20):
+    """Run a command. A list is exec'd directly; a string goes through the shell."""
     try:
-        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+                           timeout=timeout, shell=isinstance(cmd, str))
     except Exception:
         return None
     if p.returncode != 0:
@@ -278,13 +280,35 @@ def read_git(root, cfg):
     return {"head": head, "head_sha": head.split(" ")[0], "branch": branch, "dirty": dirty}
 
 
+def run_extra(cmd, cwd):
+    """Extras runner: never raises and always returns a display string.
+
+    On failure returns `!(reason)` instead of a silent `?`. A list is exec'd
+    directly; a string goes through the shell (pipes work).
+    """
+    try:
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+                           timeout=20, shell=isinstance(cmd, str))
+    except subprocess.TimeoutExpired:
+        return "!(timeout)"
+    except FileNotFoundError as exc:
+        return f"!(not found: {exc.filename or cmd})"
+    except Exception as exc:  # noqa: BLE001
+        return f"!({type(exc).__name__})"
+    if p.returncode != 0:
+        last = (p.stderr or "").strip().splitlines()
+        return f"!(exit {p.returncode}{': ' + last[-1][:60] if last else ''})"
+    return p.stdout.strip()
+
+
 def read_extras(root, cfg):
     out = []
     for item in cfg.get("extras") or []:
         if not isinstance(item, dict) or not item.get("command"):
             continue
-        val = run(item["command"], cwd=root)
-        out.append({"label": item.get("label") or item["command"], "value": val if val is not None else "?"})
+        raw = item["command"]
+        label = item.get("label") or (raw if isinstance(raw, str) else " ".join(raw))
+        out.append({"label": label, "value": run_extra(raw, root)})
     return out
 
 
@@ -379,7 +403,11 @@ def render_text(data, use_color):
         lines.append(c(data["subtitle"], "gray"))
     k = data["kpi"]
     lines.append(f"HEAD {k['head_sha']}  branch {k['branch']}  dirty {k['dirty']}")
-    extra = "  ".join(f"{e['label']} {e['value']}" for e in data.get("extras", []))
+    extra_parts = []
+    for e in data.get("extras", []):
+        v = str(e["value"])
+        extra_parts.append(f"{e['label']} " + (color(v, "red", use_color) if v.startswith("!(") else v))
+    extra = "  ".join(extra_parts)
     if extra:
         lines.append(extra)
 

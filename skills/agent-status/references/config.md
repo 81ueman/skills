@@ -13,7 +13,8 @@
   "herdr": { "enabled": true, "workspaces": ["w50", "w61"], "cwd_match": true },
   "kpi":   { "exclude": ["README.md", "catalog.json", "notes/", "papers/", "summaries/", ".agent-status/"] },
   "extras": [
-    { "label": "egress fixtures", "command": "ls -d semantic-contract/egress-* | wc -l" }
+    { "label": "fixtures", "command": ["sh", "-c", "ls -d semantic-contract/egress-* 2>/dev/null | wc -l"] },
+    { "label": "commits", "command": "git rev-list --count HEAD" }
   ],
   "watch_interval": 5
 }
@@ -26,8 +27,21 @@
 | `herdr.workspaces` | 跨いで見る Herdr workspace（`--workspace` で上書き追加） |
 | `herdr.cwd_match` | `<repo>` 配下の cwd の pane だけに絞る |
 | `kpi.exclude` | dirty 件数から除外するパスの部分文字列 |
-| `extras` | 追加 KPI。`command` の stdout を 1 行で表示 |
+| `extras` | 追加 KPI。`command` の stdout を 1 行で表示。**配列は exec、文字列は shell 経由**（パイプ可）。配列を推奨。失敗時は `!(理由)` を赤字表示 |
 | `watch_interval` | `watch` / `show` の更新秒数（既定 5） |
+
+### extras の書き方
+
+```json
+"extras": [
+  { "label": "fixtures", "command": ["sh", "-c", "ls -d egress-* 2>/dev/null | wc -l"] },
+  { "label": "commits",  "command": "git rev-list --count HEAD" }
+]
+```
+
+- 配列（推奨）: そのまま exec。シェルを介さないので安全。
+- 文字列: `shell=True` で実行。パイプ・リダイレクトが使える。
+- どちらも 20 秒でタイムアウト。失敗時は `?` ではなく `!(理由)`（例 `!(exit 2: ...)`, `!(not found: ...)`）を赤字で表示する。
 
 生成物（`status-pane` など）も `.agent-status/` に置かれる。リポジトリを汚さないため
 `.agent-status/` を `.gitignore` するのを推奨。
