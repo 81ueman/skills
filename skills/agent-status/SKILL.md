@@ -1,6 +1,6 @@
 ---
 name: agent-status
-description: Herdr上で複数エージェントが並行作業しているときのライブ進捗ダッシュボードを、呼び出し中のpaneの隣に表示する。relay（agentctl / SQLite）のタスク台帳とHerdrのpane/agent状態、gitのKPIを集約し、残りタスク・完了タスク・worker状態をANSIで自動更新表示する。「進捗を見せて」「状況は」「ダッシュボード出して」「残りタスク一覧」「タスクの進み具合」「agent-status」などで使う。
+description: Herdr上で複数エージェントが並行作業しているときのライブ進捗ダッシュボードを、呼び出し中のpaneの隣に表示する。relay（SQLite が正本）のタスク台帳とHerdrのpane/agent状態、gitのKPIを集約し、残りタスク・完了タスク・worker状態をANSIで自動更新表示する。「進捗を見せて」「状況は」「ダッシュボード出して」「残りタスク一覧」「タスクの進み具合」「agent-status」などで使う。
 slash: true
 ---
 
@@ -12,9 +12,9 @@ slash: true
 **残りタスク・完了タスク・各 worker/agent の状態**を一目で見えるようにする。常駐はせず、
 明示的に呼び出したときだけ Herdr ペインを 1 枚開いて自動更新する。
 
-タスクの正本は **relay（`agentctl` の SQLite: `<repo>/.agentctl/state.db`）**。
+タスクの正本は **relay（SQLite: `<repo>/.relay/state.db`）**。
 Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。本スキルは表示専用で、
-タスクの追加・claim・submit などは行わない（それは `agentctl` の仕事）。
+タスクの追加・claim・submit などは行わない（それは `relay` CLI の仕事）。
 表示中に `.agent-status/config.json` を編集すると次の更新で反映される（pane 再起動不要）。
 
 ## いつ使うか
@@ -27,7 +27,7 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
 ## 前提
 
 - Herdr 内で実行していること（`HERDR_ENV=1`）。ペイン表示は Herdr 必須。
-- タスク台帳は relay が動いているリポジトリの `<repo>/.agentctl/state.db`。
+- タスク台帳は relay が動いているリポジトリの `<repo>/.relay/state.db`。
   DB は **read-only** でしか読まない（WAL への書き込みをしない）。
 - relay が無いリポジトリでは `.agent-status/plan.json`（手書き）にフォールバックする。
   どちらも無ければタスク欄は空表示になる（推測で埋めない）。
@@ -78,7 +78,7 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
 | relay がまだ無いリポジトリ | `.agent-status/plan.json` を置く（[references/config.md](references/config.md) のスキーマ） |
 | 表示を細かく変えたい（KPI 追加・除外） | `.agent-status/config.json` を編集 |
 | relay を読めているか不安 | `status doctor` で DB / 行数を確認 |
-| タスクを進めたい | 本スキルではなく `agentctl next/note/submit`（`agent-worker` skill） |
+| タスクを進めたい | 本スキルではなく `relay next/note/submit`（`agent-worker` skill） |
 
 ## 表示の読み方
 
@@ -87,7 +87,7 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
   relay の `parent_task_id` があれば親子をツリー表示（子はインデント）。
 - `DONE (n)` … 完了タスク（最新 30 件）。階層があれば同じ段でインデント表示。
 - `PLAN` … plan.json の台帳。`parent` があればツリー表示。
-- `RELAY WORKERS` … `agentctl` の worker 状態と最終進捗からの経過時間。
+- `RELAY WORKERS` … `relay` の worker 状態と最終進捗からの経過時間。
 - `HERDR PANES` … pane ごとの `agent_status`（working/idle/blocked/unknown）。`*` はフォーカス中。
   エージェントの居ない pane（シェル等）とダッシュボード自身の pane は既定で非表示（`herdr.show_shells` で表示）。
 - `sources` … relay / herdr / plan のどれを採用したか。
@@ -95,7 +95,7 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
 ## アンチパターン
 
 - `HERDR_ENV != 1` で `status show` を呼ぶ（ペインを作れない。`render` を使う）
-- relay DB を書き込みモードで開く・`agentctl` のタスクを本スキルから更新する（表示専用）
+- relay DB を書き込みモードで開く・`relay` のタスクを本スキルから更新する（表示専用）
 - relay が無いのにタスク欄を推測で埋める（空のまま出す）
 - 自分の作った status pane 以外を `hide` で閉じる（本スキルは追跡中の pane だけを閉じる）
 - 常駐させるために daemon 化する（常時起動はしない。必要なときだけ `show`/`hide`）
@@ -105,4 +105,4 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
 - データソースの詳細: [references/sources.md](references/sources.md)
 - config スキーマと plan フォーマット: [references/config.md](references/config.md)
 - 設定雛形: [templates/config.json](templates/config.json)
-- relay 本体: `~/ghq/github.com/81ueman/relay`（`agentctl`、SQLite が正本）
+- relay 本体: `~/ghq/github.com/81ueman/relay`（SQLite が正本）

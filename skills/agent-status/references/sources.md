@@ -4,7 +4,7 @@
 
 ## 1. relay（タスクの正本）
 
-- DB 探索順: config `relay.db` → `$AGENTCTL_DB` → `<repo>` から親方向に `.agentctl/state.db` を探索。
+- DB 探索順: config `relay.db` → `$RELAY_DB` → `<repo>` から親方向に `.relay/state.db` を探索。
 - 読み取り: Python stdlib `sqlite3` を `file:<path>?mode=ro`（read-only）で開く。
   失敗時は `sqlite3 -readonly -json` CLI にフォールバック。**書き込みは一切しない。**
 - 使うテーブルと列（relay の `src/schema.ts` 準拠）:
@@ -22,7 +22,7 @@
   兄弟は上記の state/priority 順。親が存在しない孤児や循環参照は depth 0 に落として必ず表示する。
   `done` の子も所属段は保たれる（残り/完了のセクションをまたいでもインデントは維持）。
 
-将来 relay が `agentctl status --json` などを公開したら、それを優先する実装に差し替える。
+将来 relay が `relay status --json` などを公開したら、それを優先する実装に差し替える。
 
 ## 2. Herdr（pane / agent のライブ状態）
 

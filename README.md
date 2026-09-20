@@ -25,7 +25,7 @@ skills/
 | スキル | 説明 |
 | --- | --- |
 | `diagram-tool-choice` | 図を描く前に d2 / Mermaid を判断軸の表で選び、対応するスキルへ誘導する |
-| `agent-status` | relay（agentctl/SQLite）と Herdr から残り/完了タスクを集約し、pane の隣にライブ表示する |
+| `agent-status` | relay（SQLite が正本）と Herdr から残り/完了タスクを集約し、pane の隣にライブ表示する |
 | `d2-diagrams` | d2 の CLI、レイアウトエンジン（dagre/elk/tala）、記法、テンプレート |
 | `mermaid-diagrams` | Mermaid の CLI（mmdc / mermaid-ascii）、記法、テンプレート |
 | `skill-authoring` | 新規スキル作成の手順（実体の置き場・frontmatter・リンク・commit/push） |

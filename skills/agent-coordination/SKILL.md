@@ -9,8 +9,9 @@ Herdr上の複数エージェントpane間で、指示・仲裁・完了検知�
 正本はファイルシステム（`/tmp/coord/<task>/spec.json`＋`result.json`）。出力文字列マッチ（MARK）は使わない。
 
 > **廃止予定（移行中）**: 本スキルの `scripts/coord`（`/tmp/coord` の spec/result を正本とする方式）は廃止する。
-> 今後の協調・タスク台帳の正本は **relay**（`agentctl` の SQLite: `<repo>/.agentctl/state.db`）へ移行する。
-> relay 本体の CLI 名改称（`agentctl` → `relay`）の一括リネーム後に、本スキルも relay 前提へ書き換える。
+> 今後の協調・タスク台帳の正本は **relay**（SQLite: `<repo>/.relay/state.db`）へ移行する。
+> relay 本体の CLI 改称（`agentctl` → `relay`）と状態ディレクトリ（`.agentctl/` → `.relay/`）の移行は完了済み。
+> 本スキルも relay 前提へ書き換える（進行中）。
 > それまでの暫定として、あたらしい協調は relay 側で始め、新規に coord を使い始めないこと。
 
 ## 概要

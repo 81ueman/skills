@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""agent-status - live progress dashboard over relay (agentctl/SQLite) + Herdr.
+"""agent-status - live progress dashboard over relay (relay/SQLite) + Herdr.
 
 Sources, best-effort and independent:
-  relay   : read-only view of <repo>/.agentctl/state.db (tasks / workers)
+  relay   : read-only view of <repo>/.relay/state.db (tasks / workers)
   herdr   : `herdr pane list` for the relevant workspaces (live agent state)
   git     : HEAD / branch / dirty count (KPI)
   plan    : optional hand-written .agent-status/plan.json fallback
@@ -173,7 +173,7 @@ def color(text, name, enabled):
 # sources: relay
 # --------------------------------------------------------------------------- #
 def find_relay_db(root, cfg):
-    cand = cfg["relay"].get("db") or os.environ.get("AGENTCTL_DB")
+    cand = cfg["relay"].get("db") or os.environ.get("RELAY_DB")
     if cand:
         p = Path(os.path.expanduser(cand))
         if not p.is_absolute():
@@ -181,7 +181,7 @@ def find_relay_db(root, cfg):
         return str(p) if p.exists() else None
     cur = Path(root).resolve()
     for _ in range(12):
-        p = cur / ".agentctl" / "state.db"
+        p = cur / ".relay" / "state.db"
         if p.exists():
             return str(p)
         if cur.parent == cur:
