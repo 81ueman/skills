@@ -30,7 +30,7 @@
 | `relay.db` | 明示したい relay DB パス（通常は自動探索でよい） |
 | `plan.path` | plan.json のパス（既定 `.agent-status/plan.json`） |
 | `plan.stall_after_minutes` | Phase 2（スタール表示）のしきい値。既定 10 |
-| `herdr.workspaces` | 跨いで見る Herdr workspace（`--workspace` で上書き追加） |
+| `herdr.workspaces` | 跨いで見る Herdr workspace。**relay が worker を置いている workspace は自動で足される**ので、pane を新しい workspace へ移しても設定漏れで「unplaced」になることはない。`--workspace` を渡すとその範囲だけを見る（自動追加しない） |
 | `herdr.cwd_match` | `<repo>` 配下の cwd の pane だけに絞る |
 | `herdr.show_shells` | `false`（既定）でエージェントの居ない pane（シェル・コマンド実行）を非表示。ダッシュボード自身の pane は常に除外 |
 | `herdr.links` | `true`（既定）で pane id を OSC8 リンク化。TTY のときだけ有効で、Ctrl+click でその pane へ移動（[sources.md](sources.md)） |

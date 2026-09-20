@@ -253,13 +253,25 @@ def _sqlite_rows(db, sql):
     return None
 
 
+def _has_column(db, table, column):
+    """True when `table` exposes `column` (older relay DBs predate some of them)."""
+    rows = _sqlite_rows(db, f"PRAGMA table_info({table})")
+    return bool(rows) and any(r.get("name") == column for r in rows)
+
+
 def read_relay(db):
     if not db:
         return None
     tasks = _sqlite_rows(
         db, "SELECT id,title,state,priority,role,assignee,parent_task_id,plan_id,updated_at FROM tasks")
-    workers = _sqlite_rows(
-        db, "SELECT id,role,state,current_task_id,generation,last_progress_at FROM workers")
+    # Retired workers are history only (relay `worker retire`): their row survives
+    # so old events stay resolvable, but they must never render as a live worker
+    # (least of all as an "unplaced" one). Guard on the column so this keeps
+    # working against a relay that predates the retirement feature.
+    workers_sql = "SELECT id,role,state,current_task_id,generation,last_progress_at FROM workers"
+    if _has_column(db, "workers", "retired_at"):
+        workers_sql += " WHERE retired_at IS NULL"
+    workers = _sqlite_rows(db, workers_sql)
     # Herdr placement per worker (used only for display grouping; absent on old DBs).
     runtimes = _sqlite_rows(
         db, "SELECT worker_id,generation,created_at,workspace_id,tab_id,pane_id,runtime_id FROM worker_runtimes")
@@ -304,14 +316,39 @@ def herdr_json(args):
         return None
 
 
+def relay_worker_workspaces(root, cfg):
+    """relay の runtime が指している workspace（config に書き忘れた分を拾うため）。"""
+    if not cfg["relay"].get("enabled", True):
+        return []
+    try:
+        db = find_relay_db(root, cfg)
+        if not db:
+            return []
+        rows = _sqlite_rows(
+            db, "SELECT DISTINCT workspace_id FROM worker_runtimes WHERE workspace_id IS NOT NULL")
+    except Exception:
+        return []
+    return [r.get("workspace_id") for r in rows if r.get("workspace_id")]
+
+
 def read_agents(cfg, root, extra_ws):
     if not cfg["herdr"].get("enabled", True) or os.environ.get("HERDR_ENV") != "1":
         return None
-    ws = list(dict.fromkeys(list(extra_ws or []) + list(cfg["herdr"].get("workspaces") or [])))
-    if not ws:
-        cur = os.environ.get("HERDR_WORKSPACE_ID")
-        if cur:
-            ws = [cur]
+    # Which workspaces to read:
+    #   --workspace wins outright (an explicit scope, never widened);
+    #   otherwise config.herdr.workspaces UNION every workspace relay has
+    #   actually placed a worker in. The union is what stops a stale config
+    #   entry from hiding workers that were moved to a new workspace — they
+    #   would otherwise show up as bogus "unplaced workers (no pane)".
+    if extra_ws:
+        ws = list(dict.fromkeys(extra_ws))
+    else:
+        ws = list(dict.fromkeys(
+            list(cfg["herdr"].get("workspaces") or []) + relay_worker_workspaces(root, cfg)))
+        if not ws:
+            cur = os.environ.get("HERDR_WORKSPACE_ID")
+            if cur:
+                ws = [cur]
     panes = []
     for w in ws:
         d = herdr_json(["pane", "list", "--workspace", w])
@@ -821,12 +858,24 @@ def render_text(data, use_color, links=False, width=120):
         return head + _trim(a["title"], width - used)
 
     def worker_lines(ws, ws_workers, indent):
+        ind_w = _dwidth(indent)
+        # 固定部: indent + state(14) + ' ' + ' task='(6)
+        lead = ind_w + 14 + 1 + 6
         for w in ws_workers:
             tag = color(f"{w['state']:<14}", WORKER_COLOR.get(w["state"]), use_color)
             tail = f"gen={w.get('generation')}  last-progress {fmt_age(w.get('idle_ms'))}"
-            used = len(indent) + 14 + 1 + 16 + 1 + len("task=") + 2 + _dwidth(tail)
-            lines.append(f"{indent}{tag} {str(w['id']):<16} task="
-                         f"{_trim(w.get('task') or '-', width - used)}  {tail}")
+            tail_w = _dwidth(tail)
+            # 右端の tail は、id(最低4) + task(最低1) の余地が残るときだけ付ける。
+            tail_part = 2 + tail_w
+            keep_tail = lead + tail_part + 4 + 1 <= width
+            avail = width - lead - (tail_part if keep_tail else 0)
+            id_w = max(4, min(16, avail - 1))
+            id_s = _trim(str(w["id"]), id_w)
+            task_s = _trim(w.get("task") or "-", max(1, avail - _dwidth(id_s)))
+            line = f"{indent}{tag} {id_s} task={task_s}"
+            if keep_tail:
+                line += "  " + tail
+            lines.append(line)
 
     if data["agents"]:
         lines.append("")

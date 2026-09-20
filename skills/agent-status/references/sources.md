@@ -12,7 +12,7 @@
   | テーブル | 列 |
   | --- | --- |
   | `tasks` | `id, title, state, priority, role, assignee, parent_task_id, updated_at` |
-  | `workers` | `id, role, state, current_task_id, generation, last_progress_at` |
+  | `workers` | `id, role, state, current_task_id, generation, last_progress_at`。`retired_at` 列があれば retired を除外（relay `worker retire` の tombstone） |
   | `worker_runtimes` | `worker_id, generation, created_at, workspace_id, tab_id, pane_id, runtime_id`（worker の階層表示用。古い DB に無ければ無視） |
 
 - task state: `queued running review done blocked_internal blocked_human failed`
@@ -25,6 +25,11 @@
 - worker の表示: `worker_runtimes` の `pane_id` で pane に **1:1 対応付け**し、`AGENTS` の pane 行に
   併記する（同一 worker は generation 最大→`created_at` 最新の行を採用）。pane が無い worker は
   `UNPLACED WORKERS (no pane)` に出す。Herdr 未使用時だけ `RELAY WORKERS` として `workspace_id` ごとに表示する。
+  relay 側で retire 済み（`workers.retired_at` が非 NULL）の worker は、履歴として行は残るが
+  ここには出さない。
+- 表示する workspace は `herdr.workspaces` **と** relay の `worker_runtimes.workspace_id` の和。
+  pane を新しい workspace へ移したときに config の更新漏れで worker が `UNPLACED` に落ちるのを防ぐ。
+  `--workspace` を渡したときは自動追加せず、その範囲だけを見る。
 
 将来 relay が `relay status --json` などを公開したら、それを優先する実装に差し替える。
 
