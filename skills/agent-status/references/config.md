@@ -4,6 +4,10 @@
 
 `--config <path>` か `$AGENT_STATUS_CONFIG` で上書き可能。無ければ全項目デフォルト。
 
+`watch`（および `show` が起動する watch）は config.json の mtime を毎ループ確認し、変更を検知すると
+**次の更新で再読込**する（pane 再起動不要）。plan / relay / herdr / git は元々毎回読み直す。
+`--workspace` など CLI 引数は起動時固定なので、切り替えたい場合は `show`/`watch` を再起動する。
+
 ```json
 {
   "title": "Egress ACL — executable end-to-end",

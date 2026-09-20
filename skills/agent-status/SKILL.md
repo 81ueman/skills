@@ -15,6 +15,7 @@ slash: true
 タスクの正本は **relay（`agentctl` の SQLite: `<repo>/.agentctl/state.db`）**。
 Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。本スキルは表示専用で、
 タスクの追加・claim・submit などは行わない（それは `agentctl` の仕事）。
+表示中に `.agent-status/config.json` を編集すると次の更新で反映される（pane 再起動不要）。
 
 ## いつ使うか
 

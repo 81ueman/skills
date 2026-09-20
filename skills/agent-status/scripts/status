@@ -140,6 +140,20 @@ def _tracked_pane(root):
     return None
 
 
+def _config_stamp(root, explicit):
+    path = explicit or os.environ.get("AGENT_STATUS_CONFIG")
+    if path:
+        p = Path(os.path.expanduser(path))
+        if not p.is_absolute():
+            p = Path(root) / p
+    else:
+        p = Path(root) / STATE_DIRNAME / "config.json"
+    try:
+        return (str(p), p.stat().st_mtime_ns)
+    except Exception:
+        return (str(p), None)
+
+
 def is_under(path, root):
     if not path:
         return False
@@ -514,9 +528,15 @@ def cmd_render(args, root, cfg):
 
 
 def cmd_watch(args, root, cfg):
-    interval = args.interval or cfg.get("watch_interval") or WATCH_DEFAULT
+    explicit = getattr(args, "config", None)
+    stamp = _config_stamp(root, explicit)
     try:
         while True:
+            cur = _config_stamp(root, explicit)
+            if cur != stamp:  # config.json edited/appeared/removed -> reload
+                cfg, _ = load_config(root, explicit)
+                stamp = cur
+            interval = args.interval or cfg.get("watch_interval") or WATCH_DEFAULT
             data = collect(root, cfg, args.workspaces)
             sys.stdout.write("\033[2J\033[H")
             print(render_text(data, True))
