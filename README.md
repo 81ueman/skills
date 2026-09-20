@@ -52,6 +52,21 @@ for s in agent-status d2-diagrams diagram-tool-choice mermaid-diagrams skill-aut
 done
 ```
 
+## 他リポジトリが実体を持つスキル
+
+プロダクト側のリポジトリが同梱し、その README やコードから参照しているスキルは、実体を
+そのリポジトリに置いたままグローバルから**直接リンク**する。このリポジトリには取り込まない
+（クロスリポジトリの symlink をコミットすると移植できず、二重管理にもなるため）。
+
+| スキル | 実体 | 備考 |
+| --- | --- | --- |
+| `agent-worker` | `~/ghq/github.com/81ueman/relay/.opencode/skills/agent-worker` | relay が `.opencode/skills/agent-worker/SKILL.md` を README・plugin・runtime から参照。正本は relay 側 |
+
+```sh
+RELAY="$HOME/ghq/github.com/81ueman/relay"
+ln -sfn "$RELAY/.opencode/skills/agent-worker" "$HOME/.agents/skills/agent-worker"
+```
+
 ## 外部からインストールしたスキルとの違い
 
 `~/.agents/skills/` には外部リポジトリから導入したスキルも同居している。それらは
