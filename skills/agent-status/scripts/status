@@ -594,7 +594,7 @@ def render_text(data, use_color, links=False):
         groups = group_panes(data["agents"])
         multi_ws = len(groups) > 1
 
-        def pane_line(base, a, tab_label=""):
+        def pane_line(base, a):
             tag = color(f"{a['agent_status']:<8}", AGENT_COLOR.get(a["agent_status"]), use_color)
             star = "*" if a.get("focused") else " "
             plain = a["pane_id"] or "?"
@@ -602,8 +602,7 @@ def render_text(data, use_color, links=False):
             if links:
                 pad = f"{ANSI['underline']}{pad}{ANSI['reset']}"
             pid = link(pad, f"{PANE_LINK_BASE}{plain}", links)
-            mid = f"  {c(tab_label, 'blue')}" if tab_label else ""
-            return f"{base}{star}{pid} {tag}{mid}  {a['title'][:56]}"
+            return f"{base}{star}{pid} {tag}  {a['title'][:56]}"
 
         for w, tab_order, tabs in groups:
             if multi_ws:
@@ -612,9 +611,9 @@ def render_text(data, use_color, links=False):
                 panes = tabs[t]
                 tab_label = panes[0].get("tab_label") or ""
                 if len(panes) == 1:
-                    # 1 pane しかない tab は見出しを立てず、ラベルを pane 行に畳む。
+                    # 1 pane しかない tab は見出しもラベルも出さず、pane 行だけを 1 行で出す。
                     base = " " + ("  " if multi_ws else "")
-                    lines.append(pane_line(base, panes[0], tab_label))
+                    lines.append(pane_line(base, panes[0]))
                 else:
                     head = t + (f"  {tab_label}" if tab_label else "")
                     lines.append(" " + ("  " if multi_ws else "") + c(head, "blue"))

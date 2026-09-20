@@ -41,7 +41,7 @@
 - **階層表示**: `workspace → tab → pane` の順にグループ化する。
   - workspace が複数あるときだけ workspace 見出しを出す。
   - tab 見出しは **その tab に pane が 2 つ以上あるときだけ**出す（`tab_id` と label）。
-  - pane が 1 つだけの tab は見出しを立てず、tab ラベルを pane 行に畳んで **1 行**にする（縦を節約）。
+  - pane が 1 つだけの tab は見出しもラベルも出さず、pane 行だけを **1 行**にする（縦を節約）。
   - pane 行は見出しの段数だけインデントする。
 - **Ctrl+click でその pane へ移動**: pane id を OSC8 ハイパーリンク
   `https://agent-status.local/pane/<pane_id>` で包む（`herdr.links=true` かつ TTY のときのみ）。
