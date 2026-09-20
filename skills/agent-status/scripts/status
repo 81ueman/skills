@@ -30,7 +30,7 @@ DEFAULT_CONFIG = {
     "subtitle": None,
     "relay": {"enabled": True, "db": None},
     "plan": {"enabled": True, "path": f"{STATE_DIRNAME}/plan.json"},
-    "herdr": {"enabled": True, "workspaces": [], "cwd_match": True},
+    "herdr": {"enabled": True, "workspaces": [], "cwd_match": True, "show_shells": False},
     "kpi": {"exclude": ["README.md", "catalog.json", "notes/", "papers/", "summaries/", ".agent-status/"]},
     "extras": [],
     "watch_interval": WATCH_DEFAULT,
@@ -127,6 +127,17 @@ def load_config(root, explicit):
         except Exception as exc:  # noqa: BLE001
             print(f"agent-status: ignoring bad config {p}: {exc}", file=sys.stderr)
     return deep_merge(DEFAULT_CONFIG, data), (str(p) if p else None)
+
+
+def _tracked_pane(root):
+    """The pane this skill is currently drawing in, if any (no side effects)."""
+    try:
+        p = Path(root) / STATE_DIRNAME / "status-pane"
+        if p.exists():
+            return p.read_text().strip() or None
+    except Exception:
+        pass
+    return None
 
 
 def is_under(path, root):
@@ -260,6 +271,14 @@ def read_agents(cfg, root, extra_ws):
             })
     if cfg["herdr"].get("cwd_match", True):
         panes = [p for p in panes if is_under(p["cwd"], root)]
+    # Never list the dashboard's own pane.
+    tracked = _tracked_pane(root)
+    if tracked:
+        panes = [p for p in panes if p["pane_id"] != tracked]
+    # By default hide panes that are not running a recognized agent (shells,
+    # one-off commands). Set herdr.show_shells=true to include them.
+    if not cfg["herdr"].get("show_shells", False):
+        panes = [p for p in panes if p["agent"] and p["agent"] != "-"]
     return panes
 
 

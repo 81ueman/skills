@@ -31,7 +31,9 @@
   2. config `herdr.workspaces`
   3. `$HERDR_WORKSPACE_ID`
 - `herdr.cwd_match = true`（既定）なら、集めた pane のうち `cwd` が `<repo>` 配下のものだけに絞る。
-  ただし一致が 0 件のときは絞らない（別 worktree の pane を消さないため）。
+- `herdr.show_shells = false`（既定）なら、`agent` を持たない pane（シェルやコマンド実行中の pane）は除外する。
+  これによりダッシュボード自身の pane（エージェント無し）が `unknown` として混ざらない。`true` で全 pane を表示。
+- 追跡中の status pane（`.agent-status/status-pane`）は常に除外する。
 - pane 確保・停止に使うコマンド:
   `herdr pane split --pane <id> --direction right|down --cwd <dir> --no-focus` /
   `herdr pane run <id> <cmd>` / `herdr pane get <id>` / `herdr pane close <id>`

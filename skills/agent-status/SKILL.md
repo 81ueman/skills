@@ -86,6 +86,7 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
 - `DONE (n)` … 完了タスク（最新 30 件）。
 - `RELAY WORKERS` … `agentctl` の worker 状態と最終進捗からの経過時間。
 - `HERDR PANES` … pane ごとの `agent_status`（working/idle/blocked/unknown）。`*` はフォーカス中。
+  エージェントの居ない pane（シェル等）とダッシュボード自身の pane は既定で非表示（`herdr.show_shells` で表示）。
 - `sources` … relay / herdr / plan のどれを採用したか。
 
 ## アンチパターン
