@@ -60,8 +60,8 @@ relay が使えるときは relay のタスクが表示の主役で、plan は�
   "title": "Egress ACL program",
   "tasks": [
     { "id": "P1", "title": "Rust engine", "owner": "integrator", "status": "done" },
-    { "id": "P2", "title": "Go engine mirror", "owner": "w50:p4", "status": "working" },
-    { "id": "P3", "title": "C++ engine mirror", "owner": "w50:p5", "status": "delegated" },
+    { "id": "P2", "title": "Go engine mirror", "owner": "w50:p4", "status": "working", "parent": "P1" },
+    { "id": "P3", "title": "C++ engine mirror", "owner": "w50:p5", "status": "delegated", "parent": "P1" },
     { "id": "P4", "title": "3-way differential", "owner": "integrator", "status": "pending",
       "note": "Go/C++ 完了後" }
   ]
@@ -71,3 +71,5 @@ relay が使えるときは relay のタスクが表示の主役で、plan は�
 - ルートを配列にしてもよい（`[{...}, {...}]`）。
 - `status` は `done working delegated pending blocked` を想定（未知の値はグレー表示）。
 - 表示色: `done`=緑 / `working`=黄 / `delegated`=水 / `pending`=灰 / `blocked`・`failed`=赤。
+- 階層: `parent` に親タスクの `id` を書くとツリー表示（子は 2 スペース/段でインデント）。
+  表記順は配列順。親が存在しない・不明な id は root（depth 0）扱い。

@@ -215,7 +215,8 @@ def _sqlite_rows(db, sql):
 def read_relay(db):
     if not db:
         return None
-    tasks = _sqlite_rows(db, "SELECT id,title,state,priority,role,assignee,updated_at FROM tasks")
+    tasks = _sqlite_rows(
+        db, "SELECT id,title,state,priority,role,assignee,parent_task_id,updated_at FROM tasks")
     workers = _sqlite_rows(
         db, "SELECT id,role,state,current_task_id,generation,last_progress_at FROM workers")
     if tasks is None and workers is None:
@@ -348,6 +349,51 @@ def read_extras(root, cfg):
 # --------------------------------------------------------------------------- #
 # collect
 # --------------------------------------------------------------------------- #
+def _tree_order(items, key=None):
+    """Order a flat task list as a forest by `parent` (parent task id).
+
+    Returns `[(item, depth), ...]`. Items are dicts with `id` and optional
+    `parent`. Orphans and cycles fall back to depth 0 so nothing is ever dropped.
+    `key` sorts siblings; `None` keeps input order.
+    """
+    by_id = {str(it["id"]): it for it in items if it.get("id") is not None}
+    children, roots = {}, []
+    for it in items:
+        pid = it.get("parent")
+        parent = str(pid) if pid not in (None, "", "null") else None
+        own = str(it.get("id")) if it.get("id") is not None else None
+        if parent and parent in by_id and parent != own:
+            children.setdefault(parent, []).append(it)
+        else:
+            roots.append(it)
+    if key:
+        roots.sort(key=key)
+        for group in children.values():
+            group.sort(key=key)
+
+    out, seen = [], set()
+
+    def walk(node, depth):
+        nid = str(node.get("id")) if node.get("id") is not None else None
+        if nid is not None:
+            if nid in seen:
+                return
+            seen.add(nid)
+        out.append((node, depth))
+        if nid is not None:
+            for child in children.get(nid, []):
+                walk(child, depth + 1)
+
+    for root in roots:
+        walk(root, 0)
+    for it in items:  # cycles / unreachable
+        nid = str(it.get("id")) if it.get("id") is not None else None
+        if nid is not None and nid not in seen:
+            seen.add(nid)
+            out.append((it, 0))
+    return out
+
+
 def collect(root, cfg, workspaces):
     relay = read_relay(find_relay_db(root, cfg))
     plan_path, plan = read_plan(root, cfg)
@@ -360,19 +406,18 @@ def collect(root, cfg, workspaces):
             tasks["counts"][st] = tasks["counts"].get(st, 0) + 1
         tasks["total"] = len(relay["tasks"])
         tasks["done"] = tasks["counts"].get("done", 0)
-        for t in relay["tasks"]:
-            item = {
-                "id": t.get("id"), "state": t.get("state"),
-                "title": t.get("title") or "", "priority": t.get("priority"),
-                "role": t.get("role"), "assignee": t.get("assignee"),
-                "updated_at": t.get("updated_at"),
-            }
-            if item["state"] == "done":
-                tasks["done_list"].append(item)
-            else:
-                tasks["remaining"].append(item)
         order = {s: i for i, s in enumerate(TASK_ORDER)}
-        tasks["remaining"].sort(key=lambda x: (order.get(x["state"], 99), -(x["priority"] or 0)))
+        items = [{
+            "id": t.get("id"), "state": t.get("state") or "queued",
+            "title": t.get("title") or "", "priority": t.get("priority"),
+            "role": t.get("role"), "assignee": t.get("assignee"),
+            "parent": t.get("parent_task_id"), "updated_at": t.get("updated_at"),
+        } for t in relay["tasks"]]
+        ranked = _tree_order(
+            items, key=lambda x: (order.get(x["state"], 99), -(x["priority"] or 0)))
+        for item, depth in ranked:
+            item["depth"] = depth
+            (tasks["done_list"] if item["state"] == "done" else tasks["remaining"]).append(item)
 
     workers = []
     if relay:
@@ -385,6 +430,12 @@ def collect(root, cfg, workspaces):
                 "idle_ms": int(now_ms - lp) if lp else None,
             })
         workers.sort(key=lambda x: x["id"] or "")
+
+    plan_tasks = []
+    if plan:
+        plan_tasks = [dict(it) for it in (plan.get("tasks") or [])]
+        for it, depth in _tree_order(plan_tasks):
+            it["depth"] = depth
 
     title = cfg.get("title") or Path(root).name
     return {
@@ -400,7 +451,7 @@ def collect(root, cfg, workspaces):
         "extras": read_extras(root, cfg),
         "tasks": tasks,
         "workers": workers,
-        "plan": (plan or {}).get("tasks", []) if plan else [],
+        "plan": plan_tasks,
         "plan_title": (plan or {}).get("title") if plan else None,
         "agents": agents or [],
     }
@@ -466,14 +517,16 @@ def render_text(data, use_color):
             st = it["state"]
             tag = color(f"{st:<16}", TASK_COLOR.get(st), use_color)
             owner = it.get("assignee") or it.get("role") or "-"
-            lines.append(f"  {tag} {it.get('id') or '?':<8} {it['title'][:64]}  [{owner}]")
+            indent = "  " * (it.get("depth") or 0)
+            lines.append(f"  {indent}{tag} {it.get('id') or '?':<8} {it['title'][:64]}  [{owner}]")
 
         lines.append("")
         lines.append(c(f"DONE ({t['done']})", "bold"))
         if not t["done_list"]:
             lines.append(c("  (none)", "gray"))
         for it in t["done_list"][:30]:
-            lines.append(c(f"  {str(it.get('id') or '?'):<8} {it['title'][:64]}", "gray"))
+            indent = "  " * (it.get("depth") or 0)
+            lines.append(c(f"  {indent}{str(it.get('id') or '?'):<8} {it['title'][:64]}", "gray"))
         if len(t["done_list"]) > 30:
             lines.append(c(f"  ... +{len(t['done_list']) - 30} more", "gray"))
 
@@ -491,7 +544,8 @@ def render_text(data, use_color):
         for it in data["plan"]:
             st = (it.get("status") or "pending")
             tag = color(f"{st:<10}", PLAN_COLOR.get(st, "gray"), use_color)
-            lines.append(f"  {tag} {it.get('title') or '?'}  [{it.get('owner') or '-'}]"
+            indent = "  " * (it.get("depth") or 0)
+            lines.append(f"  {indent}{tag} {it.get('title') or '?'}  [{it.get('owner') or '-'}]"
                          + (f"  - {it['note']}" if it.get("note") else ""))
 
     if data["sources"].get("herdr") is not None and data["agents"]:
