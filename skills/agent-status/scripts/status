@@ -20,6 +20,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 STATE_DIRNAME = ".agent-status"
@@ -536,35 +537,110 @@ def progress_bar(done, total, width=22):
     return "[" + "#" * filled + "-" * (width - filled) + "]"
 
 
-def render_text(data, use_color, links=False):
+def _dwidth(s):
+    """端末上の表示幅。East Asian Wide / Fullwidth は 2 桁として数える。"""
+    w = 0
+    for ch in s:
+        if unicodedata.combining(ch):
+            continue
+        w += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return w
+
+
+def _trim(s, w):
+    """表示幅 w に収まるよう切り詰める（溢れる分は … に置換）。ANSI を含まない文字列に使う。"""
+    s = s or ""
+    if w <= 1:
+        return ""
+    if _dwidth(s) <= w:
+        return s
+    ell = _dwidth("…")
+    out, used = "", 0
+    for ch in s:
+        cw = _dwidth(ch)
+        if used + cw > w - ell:
+            break
+        out += ch
+        used += cw
+    return out + "…"
+
+
+def _wrap_join(tokens, width):
+    """トークン列を空白区切りで width 桁に詰める（1 行が長い場合の折り返し回避）。"""
+    out, cur = [], ""
+    for tok in tokens:
+        cand = tok if not cur else cur + " " + tok
+        if cur and _dwidth(cand) > width:
+            out.append(cur)
+            cur = tok
+        else:
+            cur = cand
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _term_width(default=120):
+    """描画先の桁数。pane 内 (watch) では resize にも追従する。"""
+    try:
+        return os.get_terminal_size(sys.stdout.fileno()).columns or default
+    except Exception:
+        try:
+            return int(os.environ.get("COLUMNS") or default)
+        except ValueError:
+            return default
+
+
+def render_text(data, use_color, links=False, width=120):
     c = lambda t, name: color(t, name, use_color)  # noqa: E731
     lines = []
-    lines.append(c(data["title"], "bold"))
+    lines.append(c(_trim(data["title"], width), "bold"))
     if data.get("subtitle"):
-        lines.append(c(data["subtitle"], "gray"))
+        lines.append(c(_trim(data["subtitle"], width), "gray"))
     k = data["kpi"]
-    lines.append(f"HEAD {k['head_sha']}  branch {k['branch']}  dirty {k['dirty']}")
-    extra_parts = []
+    lines.append(_trim(f"HEAD {k['head_sha']}  branch {k['branch']}  dirty {k['dirty']}", width))
+    extra_parts, extra_plain = [], []
     for e in data.get("extras", []):
         v = str(e["value"])
         extra_parts.append(f"{e['label']} " + (color(v, "red", use_color) if v.startswith("!(") else v))
+        extra_plain.append(f"{e['label']} {v}")
     extra = "  ".join(extra_parts)
     if extra:
-        lines.append(extra)
+        if _dwidth("  ".join(extra_plain)) <= width:
+            lines.append(extra)
+        else:
+            for chunk in _wrap_join(extra_plain, width):
+                lines.append(chunk)
 
     t = data["tasks"]
     if t["total"] or data.get("sources", {}).get("relay"):
         counts = t["counts"]
         workers = data["workers"]
         working = sum(1 for w in workers if w["state"] == "working")
-        bar = progress_bar(t["done"], t["total"])
+        counts_list = ["running", "queued", "review", "blocked_human", "blocked_internal", "failed"]
+        counts_txt = " ".join(f"{s}={counts.get(s, 0)}" for s in counts_list)
+        fixed_w = (len(f"tasks {t['done']}/{t['total']} ") + 3
+                   + len(f"workers {working} working / {len(workers)}"))
+        bar_w = min(22, max(6, width - fixed_w - 2))
+        if fixed_w + 8 <= width:
+            bar = progress_bar(t["done"], t["total"], bar_w)
+            counts_head = (f"tasks {c(str(t['done']), 'green')}/{t['total']} {bar}   "
+                           f"workers {c(str(working), 'green')} working / {len(workers)}")
+            counts_head_w = fixed_w + len(bar)
+        else:
+            # バーを出す余白がない極端に狭い pane では数値だけに畳む。
+            bar = ""
+            counts_head = (f"tasks {c(str(t['done']), 'green')}/{t['total']}  "
+                           f"workers {c(str(working), 'green')}/{len(workers)}")
+            counts_head_w = len(f"tasks {t['done']}/{t['total']}  workers {working}/{len(workers)}")
         lines.append("")
-        lines.append(
-            f"tasks {c(str(t['done']), 'green')}/{t['total']} {bar}   "
-            f"workers {c(str(working), 'green')} working / {len(workers)}   "
-            + " ".join(f"{s}={counts.get(s, 0)}" for s in
-                       ["running", "queued", "review", "blocked_human", "blocked_internal", "failed"])
-        )
+        if counts_head_w + 3 + len(counts_txt) <= width:
+            lines.append(counts_head + "   " + counts_txt)
+        else:
+            # 折り返すくらいなら 2 行以上に分ける（読み順を保つ）。
+            lines.append(counts_head)
+            for chunk in _wrap_join([f"{s}={counts.get(s, 0)}" for s in counts_list], width):
+                lines.append(c(chunk, "gray"))
 
         lines.append("")
         lines.append(c("REMAINING", "bold"))
@@ -575,7 +651,10 @@ def render_text(data, use_color, links=False):
             tag = color(f"{st:<16}", TASK_COLOR.get(st), use_color)
             owner = it.get("assignee") or it.get("role") or "-"
             indent = "  " * (it.get("depth") or 0)
-            lines.append(f"  {indent}{tag} {it.get('id') or '?':<8} {it['title'][:64]}  [{owner}]")
+            tail = f"  [{owner}]"
+            used = 2 + len(indent) + 16 + 1 + 8 + 1 + _dwidth(tail)
+            lines.append(f"  {indent}{tag} {it.get('id') or '?':<8} "
+                         f"{_trim(it['title'], width - used)}{tail}")
 
         lines.append("")
         lines.append(c(f"DONE ({t['done']})", "bold"))
@@ -583,7 +662,9 @@ def render_text(data, use_color, links=False):
             lines.append(c("  (none)", "gray"))
         for it in t["done_list"][:30]:
             indent = "  " * (it.get("depth") or 0)
-            lines.append(c(f"  {indent}{str(it.get('id') or '?'):<8} {it['title'][:64]}", "gray"))
+            used = 2 + len(indent) + 8 + 1
+            lines.append(c(f"  {indent}{str(it.get('id') or '?'):<8} "
+                           f"{_trim(it['title'], width - used)}", "gray"))
         if len(t["done_list"]) > 30:
             lines.append(c(f"  ... +{len(t['done_list']) - 30} more", "gray"))
 
@@ -594,33 +675,50 @@ def render_text(data, use_color, links=False):
             st = (it.get("status") or "pending")
             tag = color(f"{st:<10}", PLAN_COLOR.get(st, "gray"), use_color)
             indent = "  " * (it.get("depth") or 0)
-            lines.append(f"  {indent}{tag} {it.get('title') or '?'}  [{it.get('owner') or '-'}]"
-                         + (f"  - {it['note']}" if it.get("note") else ""))
+            tail = f"  [{it.get('owner') or '-'}]" + (f"  - {it['note']}" if it.get("note") else "")
+            used = 2 + len(indent) + 10 + 1 + _dwidth(tail)
+            lines.append(f"  {indent}{tag} {_trim(it.get('title') or '?', width - used)}{tail}")
 
     workers = data.get("workers") or []
     by_pane = data.get("workers_by_pane") or {}
 
-    def worker_cells(w):
-        """relay 列: worker id / 現在タスク / 最終進捗。relay 管理外の pane は "-" を薄く出す。"""
-        if not w:
-            return c(f"{'-':<16} {'-':<4} {'-':>4}", "gray")
-        return (f"{str(w.get('id') or '-')[:16]:<16} {str(w.get('task') or '-'):<4} "
-                f"{fmt_age(w.get('idle_ms')):>4}")
+    def worker_cells(w, width):
+        """relay 列: worker id / 現在タスク / 最終進捗。狭い pane では列を段階的に落とす。
+
+        戻り値は (表示文字列, 可視幅)。
+        """
+        full = 16 + 1 + 4 + 1 + 4
+        if width >= 86:
+            if not w:
+                return c(f"{'-':<16} {'-':<4} {'-':>4}", "gray"), full
+            return (f"{str(w.get('id') or '-')[:16]:<16} {str(w.get('task') or '-'):<4} "
+                    f"{fmt_age(w.get('idle_ms')):>4}"), full
+        if width >= 66:
+            if not w:
+                return c(f"{'-':<16}", "gray"), 16
+            return f"{str(w.get('id') or '-')[:16]:<16}", 16
+        return "", 0
 
     def agent_line(base, a):
         tag = color(f"{a['agent_status']:<8}", AGENT_COLOR.get(a["agent_status"]), use_color)
         star = "*" if a.get("focused") else " "
         plain = a["pane_id"] or "?"
+        pidw = 9 if width >= 36 else 7  # 極端に狭いときは pane 列のパディングを削る
         vis = f"{ANSI['underline']}{plain}{ANSI['reset']}" if links else plain
         pid = link(vis, f"{PANE_LINK_BASE}{plain}", links)
-        pad = " " * max(0, 9 - len(plain))
-        return f"{base}{star}{pid}{pad} {tag} {worker_cells(by_pane.get(plain))}  {a['title'][:48]}"
+        pad = " " * max(0, pidw - len(plain))
+        cells, cells_w = worker_cells(by_pane.get(plain), width)
+        used = len(base) + 1 + pidw + 1 + 8 + (1 + cells_w if cells_w else 0) + 2
+        head = f"{base}{star}{pid}{pad} {tag}" + (f" {cells}" if cells_w else "") + "  "
+        return head + _trim(a["title"], width - used)
 
     def worker_lines(ws, ws_workers, indent):
         for w in ws_workers:
             tag = color(f"{w['state']:<14}", WORKER_COLOR.get(w["state"]), use_color)
-            lines.append(f"{indent}{tag} {str(w['id']):<16} task={w.get('task') or '-'}  "
-                         f"gen={w.get('generation')}  last-progress {fmt_age(w.get('idle_ms'))}")
+            tail = f"gen={w.get('generation')}  last-progress {fmt_age(w.get('idle_ms'))}"
+            used = len(indent) + 14 + 1 + 16 + 1 + len("task=") + 2 + _dwidth(tail)
+            lines.append(f"{indent}{tag} {str(w['id']):<16} task="
+                         f"{_trim(w.get('task') or '-', width - used)}  {tail}")
 
     if data["agents"]:
         lines.append("")
@@ -639,6 +737,7 @@ def render_text(data, use_color, links=False):
                     lines.append(agent_line(base, panes[0]))
                 else:
                     head = t + (f"  {tab_label}" if tab_label else "")
+                    head = _trim(head, width - 1 - (2 if multi_ws else 0))
                     lines.append(" " + ("  " if multi_ws else "") + c(head, "blue"))
                     base = " " + "  " * ((1 if multi_ws else 0) + 1)
                     for a in panes:
@@ -672,7 +771,12 @@ def render_text(data, use_color, links=False):
                            if data["sources"].get("relay") else "none"))
     src.append("herdr:" + ("on" if data["sources"].get("herdr") else "off"))
     src.append("plan:" + ("yes" if data["sources"].get("plan") else "no"))
-    lines.append(c("sources " + "  ".join(src), "gray"))
+    src_line = "sources " + "  ".join(src)
+    if _dwidth(src_line) <= width:
+        lines.append(c(src_line, "gray"))
+    else:
+        for i, chunk in enumerate(_wrap_join(["sources"] + src, width)):
+            lines.append(c(("" if i == 0 else "  ") + chunk, "gray"))
     return "\n".join(lines)
 
 
@@ -690,7 +794,7 @@ def cmd_render(args, root, cfg):
     else:
         use_color = sys.stdout.isatty() or os.environ.get("FORCE_COLOR") == "1"
         links = use_color and bool(cfg["herdr"].get("links", True))
-        print(render_text(data, use_color, links))
+        print(render_text(data, use_color, links, _term_width()))
 
 
 def cmd_watch(args, root, cfg):
@@ -705,7 +809,7 @@ def cmd_watch(args, root, cfg):
             interval = args.interval or cfg.get("watch_interval") or WATCH_DEFAULT
             data = collect(root, cfg, args.workspaces)
             sys.stdout.write("\033[2J\033[H")
-            print(render_text(data, True, bool(cfg["herdr"].get("links", True))))
+            print(render_text(data, True, bool(cfg["herdr"].get("links", True)), _term_width()))
             sys.stdout.flush()
             time.sleep(interval)
     except KeyboardInterrupt:

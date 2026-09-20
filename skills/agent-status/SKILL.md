@@ -110,6 +110,9 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
   戻るときは Herdr の `keys.last_pane`（例 `prefix+semicolon`）で直前の pane へトグルする。
   Herdr 未使用時は `RELAY WORKERS` として worker だけを workspace ごとに表示する。
 - `sources` … relay / herdr / plan のどれを採用したか。
+- **幅の扱い**: pane 幅（`os.get_terminal_size`）に合わせて全行を 1 行に収める。**全角は 2 桁**として数え、
+  溢れるタイトルは `…` で切る。狭いときは relay 列を段階的に畳み（`worker / 現在タスク / 最終進捗` →
+  `worker` のみ → なし）、`tasks …` の状態内訳は別行へ、バーも縮める。resize にも追従する。
 
 ## アンチパターン
 
