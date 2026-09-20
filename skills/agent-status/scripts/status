@@ -450,6 +450,8 @@ RELAY_TO_PLAN = {
 }
 # 1 項目に複数タスクが紐づくときの代表状態（先勝ち）。
 RELAY_STATE_PRIORITY = ["blocked_human", "blocked_internal", "failed", "running", "review", "queued", "done"]
+# 「進行中」とみなす宣言値（relay リンクが無いのにこの状態なら、表示は intent だけになる）。
+IN_FLIGHT_STATUSES = {"working", "review", "delegated", "blocked"}
 # 子から親へ畳むときの優先順（先勝ち）。
 ROLLUP_PRIORITY = ["blocked", "working", "review", "failed", "pending", "done"]
 
@@ -1019,6 +1021,14 @@ def cmd_doctor(args, root, cfg, cfg_path):
         unknown = unknown_plan_links(derived, (relay or {}).get("tasks") or [])
         lines.append(f"  links         {linked}/{len(derived)} items <- relay tasks"
                      + (f"  drift={','.join(str(d) for d in drift)}" if drift else "  drift=none"))
+        # 進行中と宣言しているのに relay と繋がっていない項目 = 状態が intent のままで古びる行。
+        # （rollup で観測が伝播している親は「紐付き無し」ではないので除く。）
+        unlinked = [it.get("id") for it in derived
+                    if it.get("source") == "intent" and not it.get("relay_ids")
+                    and it.get("declared") in IN_FLIGHT_STATUSES]
+        if unlinked:
+            lines.append("  unlinked      " + ",".join(str(i) for i in unlinked)
+                         + "  (in-flight but no relay task; shown from intent only)")
         if unknown:
             lines.append("  unknown links "
                          + ", ".join(f"{tid}->{pid}" for tid, pid in unknown)
