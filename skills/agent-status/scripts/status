@@ -38,7 +38,7 @@ DEFAULT_CONFIG = {
 
 # ANSI palette
 ANSI = {
-    "reset": "\033[0m", "bold": "\033[1m", "dim": "\033[2m",
+    "reset": "\033[0m", "bold": "\033[1m", "dim": "\033[2m", "underline": "\033[4m",
     "red": "\033[31m", "green": "\033[32m", "yellow": "\033[33m",
     "blue": "\033[34m", "magenta": "\033[35m", "cyan": "\033[36m", "gray": "\033[90m",
 }
@@ -608,8 +608,13 @@ def render_text(data, use_color, links=False):
                     tag = color(f"{a['agent_status']:<8}", AGENT_COLOR.get(a["agent_status"]), use_color)
                     star = "*" if a.get("focused") else " "
                     plain = a["pane_id"] or "?"
-                    pid = link(f"{plain:<9}", f"{PANE_LINK_BASE}{plain}", links)
+                    label = f"{plain:<9}"
+                    if links:
+                        label = f"{ANSI['underline']}{label}{ANSI['reset']}"
+                    pid = link(label, f"{PANE_LINK_BASE}{plain}", links)
                     lines.append(f"{pane_indent}{star}{pid} {tag} {a['title'][:56]}")
+        if links:
+            lines.append(color("  Ctrl+click a pane id → focus that pane", "dim", use_color))
 
     lines.append("")
     src = []
