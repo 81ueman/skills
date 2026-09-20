@@ -55,9 +55,12 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
    python3 scripts/status show --repo "$PWD"
    # 統括エージェントの pane を指定してその隣に出す場合
    python3 scripts/status show --pane w52:p2M --direction right --repo "$PWD"
+   # 他の pane を分割せず、独立した tab で出す場合
+   python3 scripts/status show --tab --repo "$PWD"
    ```
 
-   - 既定は「呼び出し元 pane の右」。既存の status pane があれば再利用する。
+   - 既定は「呼び出し元 pane の右」。既存の status pane があれば**再利用**する（位置は変わらない。移すときは `hide` → `show`）。
+   - `--tab` で専用 tab に出す（既定ラベル `agent-status`。`--tab-label` / `--tab-workspace` で変更可）。既存 pane を分割しない。
    - 対象 workspace を明示する場合は `--workspace w50 --workspace w61`（複数可）。
    - 既定の対象は現在の `$HERDR_WORKSPACE_ID` かつ `<repo>` 配下の cwd を持つ pane。
 
@@ -81,6 +84,7 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
 | --- | --- |
 | 統括 pane の隣に出したい | `status show --pane <統括pane>` |
 | 自分（呼び出し元）の隣でよい | `status show` |
+| どの pane も分割せず独立 tab にしたい | `status show --tab` |
 | w50/w61 など複数 workspace を跨ぐ | `status show --workspace w50 --workspace w61` |
 | relay がまだ無いリポジトリ | `.agent-status/plan.json` を置く（[references/config.md](references/config.md) のスキーマ） |
 | 表示を細かく変えたい（KPI 追加・除外） | `.agent-status/config.json` を編集 |

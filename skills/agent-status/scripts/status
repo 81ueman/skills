@@ -732,15 +732,31 @@ def cmd_show(args, root, cfg):
         if old and _pane_alive(old):
             pane = old
     if pane is None:
-        d = herdr_json(["pane", "split", "--pane", target, "--direction", args.direction,
-                        "--cwd", root, "--no-focus"]) if target else \
-            herdr_json(["pane", "split", "--current", "--direction", args.direction,
-                        "--cwd", root, "--no-focus"])
-        try:
-            pane = d["result"]["pane"]["pane_id"]
-        except Exception:
-            print("agent-status: pane split failed", file=sys.stderr)
-            return 2
+        if getattr(args, "as_tab", False):
+            # 独立タブ: 他の pane を分割せず、専用タブの root pane で動かす。
+            ws = (getattr(args, "tab_workspace", None) or os.environ.get("HERDR_WORKSPACE_ID")
+                  or (target or "").split(":")[0] or None)
+            argv = ["tab", "create"]
+            if ws:
+                argv += ["--workspace", ws]
+            argv += ["--cwd", root,
+                     "--label", getattr(args, "tab_label", None) or "agent-status", "--no-focus"]
+            d = herdr_json(argv)
+            try:
+                pane = d["result"]["root_pane"]["pane_id"]
+            except Exception:
+                print("agent-status: tab create failed", file=sys.stderr)
+                return 2
+        else:
+            d = herdr_json(["pane", "split", "--pane", target, "--direction", args.direction,
+                            "--cwd", root, "--no-focus"]) if target else \
+                herdr_json(["pane", "split", "--current", "--direction", args.direction,
+                            "--cwd", root, "--no-focus"])
+            try:
+                pane = d["result"]["pane"]["pane_id"]
+            except Exception:
+                print("agent-status: pane split failed", file=sys.stderr)
+                return 2
         sf.write_text(pane)
     script = str(Path(__file__).resolve())
     interval = args.interval or cfg.get("watch_interval") or WATCH_DEFAULT
@@ -748,7 +764,8 @@ def cmd_show(args, root, cfg):
     if args.config:
         cmdline += f" --config {shlex.quote(args.config)}"
     run(["herdr", "pane", "run", pane, cmdline])
-    print(f"agent-status: live dashboard in {pane} (direction={args.direction})")
+    where = "tab" if getattr(args, "as_tab", False) else f"direction={args.direction}"
+    print(f"agent-status: live dashboard in {pane} ({where})")
     print(f"  stop with: python3 {shlex.quote(script)} hide --repo {shlex.quote(root)}")
     return 0
 
@@ -817,6 +834,11 @@ def build_parser():
     p.add_argument("--direction", choices=["right", "down"], default="right")
     p.add_argument("--pane", default=None)
     p.add_argument("--interval", type=float, default=None)
+    p.add_argument("--tab", action="store_true", dest="as_tab",
+                   help="open the dashboard in its own Herdr tab instead of splitting a pane")
+    p.add_argument("--tab-label", default=None, help="label for the new tab (default: agent-status)")
+    p.add_argument("--tab-workspace", default=None,
+                   help="workspace id for the new tab (default: $HERDR_WORKSPACE_ID)")
 
     p = sub.add_parser("hide", help="close the tracked dashboard pane")
     p.add_argument("--repo", default=None)
