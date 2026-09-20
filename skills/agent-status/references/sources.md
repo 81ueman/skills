@@ -48,6 +48,9 @@
   `[[link_handlers]]` が **Control+click**（全 platform で Control）を拾い、socket API
   `pane.focus {pane_id}` でその pane にフォーカスする。CLI の `herdr pane focus` は
   方向（`--direction`）しか受け付けず絶対指定できないため、socket を直接使う。
+- **戻る**: Herdr の `keys.last_pane`（既定 unset）を使う。例 `last_pane = "prefix+semicolon"`。
+  全 workspace/tab をまたいで「直前の pane」へトグルできる。`pane.focus` は Herdr 側の
+  last-pane 履歴（`record_pane_focus_change`）に記録されるため、リンクで飛んだ後も戻れる。
 - pane 確保・停止に使うコマンド:
   `herdr pane split --pane <id> --direction right|down --cwd <dir> --no-focus` /
   `herdr pane run <id> <cmd>` / `herdr pane get <id>` / `herdr pane close <id>`

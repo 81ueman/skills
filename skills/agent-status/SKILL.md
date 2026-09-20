@@ -100,6 +100,7 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
   エージェントの居ない pane（シェル等）とダッシュボード自身の pane は既定で非表示（`herdr.show_shells` で表示）。
   pane id を **Ctrl+click** するとその pane にフォーカスが移る（要プラグイン link、`herdr.links=false` で無効化）。
   pane id はリンクとして下線付きで表示し、末尾に `Ctrl+click a pane id → focus that pane` のヒント行を出す。
+  戻るときは Herdr の `keys.last_pane`（例 `prefix+semicolon`）で直前の pane へトグルする。
 - `sources` … relay / herdr / plan のどれを採用したか。
 
 ## アンチパターン
