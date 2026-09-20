@@ -598,11 +598,10 @@ def render_text(data, use_color, links=False):
             tag = color(f"{a['agent_status']:<8}", AGENT_COLOR.get(a["agent_status"]), use_color)
             star = "*" if a.get("focused") else " "
             plain = a["pane_id"] or "?"
-            pad = f"{plain:<9}"
-            if links:
-                pad = f"{ANSI['underline']}{pad}{ANSI['reset']}"
-            pid = link(pad, f"{PANE_LINK_BASE}{plain}", links)
-            return f"{base}{star}{pid} {tag}  {a['title'][:56]}"
+            vis = f"{ANSI['underline']}{plain}{ANSI['reset']}" if links else plain
+            pid = link(vis, f"{PANE_LINK_BASE}{plain}", links)
+            pad = " " * max(0, 9 - len(plain))
+            return f"{base}{star}{pid}{pad} {tag}  {a['title'][:56]}"
 
         for w, tab_order, tabs in groups:
             if multi_ws:
