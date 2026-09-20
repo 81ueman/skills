@@ -3,7 +3,7 @@
   "subtitle": null,
   "relay": { "enabled": true, "db": null },
   "plan": { "enabled": true, "path": ".agent-status/plan.json" },
-  "herdr": { "enabled": true, "workspaces": [], "cwd_match": true, "show_shells": false },
+  "herdr": { "enabled": true, "workspaces": [], "cwd_match": true, "show_shells": false, "links": true },
   "kpi": { "exclude": ["README.md", "catalog.json", "notes/", "papers/", "summaries/", ".agent-status/"] },
   "extras": [],
   "watch_interval": 5

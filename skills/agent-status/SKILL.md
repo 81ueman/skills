@@ -31,6 +31,13 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
   DB は **read-only** でしか読まない（WAL への書き込みをしない）。
 - relay が無いリポジトリでは `.agent-status/plan.json`（手書き）にフォールバックする。
   どちらも無ければタスク欄は空表示になる（推測で埋めない）。
+- pane id の **Ctrl+click 移動**を使うには、Herdr プラグインを一度 link しておく（任意）:
+
+  ```bash
+  herdr plugin link ~/.agents/skills/agent-status/herdr-plugin   # プラグイン id: agent-status.pane-links
+  ```
+
+  link しなくても階層表示は動く（pane id はリンクとして描画されるが、Ctrl+click は Herdr に拾われない）。
 
 ## 手順
 
@@ -88,8 +95,10 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
 - `DONE (n)` … 完了タスク（最新 30 件）。階層があれば同じ段でインデント表示。
 - `PLAN` … plan.json の台帳。`parent` があればツリー表示。
 - `RELAY WORKERS` … `relay` の worker 状態と最終進捗からの経過時間。
-- `HERDR PANES` … pane ごとの `agent_status`（working/idle/blocked/unknown）。`*` はフォーカス中。
+- `HERDR PANES` … `workspace → tab → pane` の階層で表示。pane ごとの `agent_status`（working/idle/blocked/unknown）、`*` はフォーカス中。
+  workspace / tab が複数あるときだけ見出し（tab はラベル付き）を出し、pane はその下にインデントされる。
   エージェントの居ない pane（シェル等）とダッシュボード自身の pane は既定で非表示（`herdr.show_shells` で表示）。
+  pane id を **Ctrl+click** するとその pane にフォーカスが移る（要プラグイン link、`herdr.links=false` で無効化）。
 - `sources` … relay / herdr / plan のどれを採用したか。
 
 ## アンチパターン
@@ -105,4 +114,5 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
 - データソースの詳細: [references/sources.md](references/sources.md)
 - config スキーマと plan フォーマット: [references/config.md](references/config.md)
 - 設定雛形: [templates/config.json](templates/config.json)
+- Ctrl+click で pane へ移動する Herdr プラグイン: [herdr-plugin/](herdr-plugin/)（`[[link_handlers]]` + socket `pane.focus`）
 - relay 本体: `~/ghq/github.com/81ueman/relay`（SQLite が正本）

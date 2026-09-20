@@ -30,7 +30,7 @@ DEFAULT_CONFIG = {
     "subtitle": None,
     "relay": {"enabled": True, "db": None},
     "plan": {"enabled": True, "path": f"{STATE_DIRNAME}/plan.json"},
-    "herdr": {"enabled": True, "workspaces": [], "cwd_match": True, "show_shells": False},
+    "herdr": {"enabled": True, "workspaces": [], "cwd_match": True, "show_shells": False, "links": True},
     "kpi": {"exclude": ["README.md", "catalog.json", "notes/", "papers/", "summaries/", ".agent-status/"]},
     "extras": [],
     "watch_interval": WATCH_DEFAULT,
@@ -169,6 +169,41 @@ def color(text, name, enabled):
     return f"{ANSI.get(name, '')}{text}{ANSI['reset']}"
 
 
+OSC8_PREFIX = "\033]8;;"
+OSC8_SUFFIX = "\033\\"
+# Ctrl+click target for a pane. An https URL is recognized as a link by every
+# terminal; Herdr's [[link_handlers]] then routes the modified click to the
+# agent-status plugin instead of opening it. The host never resolves.
+PANE_LINK_BASE = "https://agent-status.local/pane/"
+
+
+def link(text, url, enabled):
+    """Wrap text in an OSC8 hyperlink (ST-terminated). Inert when disabled."""
+    if not enabled or not url:
+        return text
+    return f"{OSC8_PREFIX}{url}{OSC8_SUFFIX}{text}{OSC8_PREFIX}{OSC8_SUFFIX}"
+
+
+def group_panes(panes):
+    """Group panes as workspace -> tab -> panes, preserving encounter order.
+
+    Returns `[(workspace_id, [tab_id, ...], {tab_id: [pane, ...]}), ...]`.
+    """
+    order, wmap = [], {}
+    for p in panes:
+        w = p.get("workspace_id") or "?"
+        t = p.get("tab_id") or "?"
+        if w not in wmap:
+            wmap[w] = {"order": [], "tabs": {}}
+            order.append(w)
+        rec = wmap[w]
+        if t not in rec["tabs"]:
+            rec["tabs"][t] = []
+            rec["order"].append(t)
+        rec["tabs"][t].append(p)
+    return [(w, wmap[w]["order"], wmap[w]["tabs"]) for w in order]
+
+
 # --------------------------------------------------------------------------- #
 # sources: relay
 # --------------------------------------------------------------------------- #
@@ -273,6 +308,10 @@ def read_agents(cfg, root, extra_ws):
         d = herdr_json(["pane", "list", "--workspace", w])
         if not d:
             continue
+        tab_labels = {}
+        td = herdr_json(["tab", "list", "--workspace", w])
+        for t in (td or {}).get("result", {}).get("tabs", []):
+            tab_labels[t.get("tab_id")] = t.get("label") or ""
         for p in d.get("result", {}).get("panes", []):
             panes.append({
                 "pane_id": p.get("pane_id", "?"),
@@ -282,6 +321,7 @@ def read_agents(cfg, root, extra_ws):
                 "cwd": p.get("cwd") or "",
                 "workspace_id": p.get("workspace_id") or w,
                 "tab_id": p.get("tab_id") or "",
+                "tab_label": tab_labels.get(p.get("tab_id"), "") or "",
                 "focused": bool(p.get("focused")),
             })
     if cfg["herdr"].get("cwd_match", True):
@@ -479,7 +519,7 @@ def progress_bar(done, total, width=22):
     return "[" + "#" * filled + "-" * (width - filled) + "]"
 
 
-def render_text(data, use_color):
+def render_text(data, use_color, links=False):
     c = lambda t, name: color(t, name, use_color)  # noqa: E731
     lines = []
     lines.append(c(data["title"], "bold"))
@@ -551,10 +591,25 @@ def render_text(data, use_color):
     if data["sources"].get("herdr") is not None and data["agents"]:
         lines.append("")
         lines.append(c("HERDR PANES", "bold"))
-        for a in data["agents"]:
-            tag = color(f"{a['agent_status']:<8}", AGENT_COLOR.get(a["agent_status"]), use_color)
-            star = "*" if a.get("focused") else " "
-            lines.append(f" {star}{a['pane_id']:<9} {tag} {a['title'][:56]}")
+        groups = group_panes(data["agents"])
+        multi_ws = len(groups) > 1
+        for w, tab_order, tabs in groups:
+            if multi_ws:
+                lines.append(" " + c(w, "blue"))
+            tab_header = len(tab_order) > 1
+            for t in tab_order:
+                panes = tabs[t]
+                if tab_header:
+                    label = panes[0].get("tab_label") or ""
+                    head = t + (f"  {label}" if label else "")
+                    lines.append(" " + ("  " if multi_ws else "") + c(head, "blue"))
+                pane_indent = " " + "  " * ((1 if multi_ws else 0) + (1 if tab_header else 0))
+                for a in panes:
+                    tag = color(f"{a['agent_status']:<8}", AGENT_COLOR.get(a["agent_status"]), use_color)
+                    star = "*" if a.get("focused") else " "
+                    plain = a["pane_id"] or "?"
+                    pid = link(f"{plain:<9}", f"{PANE_LINK_BASE}{plain}", links)
+                    lines.append(f"{pane_indent}{star}{pid} {tag} {a['title'][:56]}")
 
     lines.append("")
     src = []
@@ -578,7 +633,9 @@ def cmd_render(args, root, cfg):
     if args.json:
         print(render_json(data))
     else:
-        print(render_text(data, sys.stdout.isatty() or os.environ.get("FORCE_COLOR") == "1"))
+        use_color = sys.stdout.isatty() or os.environ.get("FORCE_COLOR") == "1"
+        links = use_color and bool(cfg["herdr"].get("links", True))
+        print(render_text(data, use_color, links))
 
 
 def cmd_watch(args, root, cfg):
@@ -593,7 +650,7 @@ def cmd_watch(args, root, cfg):
             interval = args.interval or cfg.get("watch_interval") or WATCH_DEFAULT
             data = collect(root, cfg, args.workspaces)
             sys.stdout.write("\033[2J\033[H")
-            print(render_text(data, True))
+            print(render_text(data, True, bool(cfg["herdr"].get("links", True))))
             sys.stdout.flush()
             time.sleep(interval)
     except KeyboardInterrupt:

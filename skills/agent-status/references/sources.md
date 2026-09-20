@@ -29,6 +29,7 @@
 - `HERDR_ENV=1` のときだけ有効。`herdr pane list --workspace <ws>` を対象 ws ごとに実行。
 - JSON の `result.panes[]` から使うフィールド:
   `pane_id, agent, agent_status, terminal_title_stripped, cwd, workspace_id, tab_id, focused`
+- tab ラベルは `herdr tab list --workspace <ws>` の `result.tabs[]`（`tab_id, label`）から引く。
 - 対象 ws の決定順:
   1. `--workspace`（複数可）
   2. config `herdr.workspaces`
@@ -37,6 +38,16 @@
 - `herdr.show_shells = false`（既定）なら、`agent` を持たない pane（シェルやコマンド実行中の pane）は除外する。
   これによりダッシュボード自身の pane（エージェント無し）が `unknown` として混ざらない。`true` で全 pane を表示。
 - 追跡中の status pane（`.agent-status/status-pane`）は常に除外する。
+- **階層表示**: `workspace → tab → pane` の順にグループ化する。
+  - workspace が複数あるときだけ workspace 見出しを出す。
+  - 同じ workspace 内に tab が複数あるときだけ tab 見出し（`tab_id` と label）を出す。
+  - pane 行は見出しの段数だけインデントする。1 ws・1 tab のときは見出し無しで従来どおり。
+- **Ctrl+click でその pane へ移動**: pane id を OSC8 ハイパーリンク
+  `https://agent-status.local/pane/<pane_id>` で包む（`herdr.links=true` かつ TTY のときのみ）。
+  [../herdr-plugin/](../herdr-plugin/) の Herdr プラグイン `agent-status.pane-links` の
+  `[[link_handlers]]` が **Control+click**（全 platform で Control）を拾い、socket API
+  `pane.focus {pane_id}` でその pane にフォーカスする。CLI の `herdr pane focus` は
+  方向（`--direction`）しか受け付けず絶対指定できないため、socket を直接使う。
 - pane 確保・停止に使うコマンド:
   `herdr pane split --pane <id> --direction right|down --cwd <dir> --no-focus` /
   `herdr pane run <id> <cmd>` / `herdr pane get <id>` / `herdr pane close <id>`

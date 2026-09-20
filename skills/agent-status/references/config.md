@@ -14,7 +14,7 @@
   "subtitle": "HD-4 / control → lowering → Rust|Go|C++ → vendor E2E",
   "relay": { "enabled": true, "db": null },
   "plan":  { "enabled": true, "path": ".agent-status/plan.json" },
-  "herdr": { "enabled": true, "workspaces": ["w50", "w61"], "cwd_match": true, "show_shells": false },
+  "herdr": { "enabled": true, "workspaces": ["w50", "w61"], "cwd_match": true, "show_shells": false, "links": true },
   "kpi":   { "exclude": ["README.md", "catalog.json", "notes/", "papers/", "summaries/", ".agent-status/"] },
   "extras": [
     { "label": "fixtures", "command": ["sh", "-c", "ls -d semantic-contract/egress-* 2>/dev/null | wc -l"] },
@@ -31,6 +31,7 @@
 | `herdr.workspaces` | 跨いで見る Herdr workspace（`--workspace` で上書き追加） |
 | `herdr.cwd_match` | `<repo>` 配下の cwd の pane だけに絞る |
 | `herdr.show_shells` | `false`（既定）でエージェントの居ない pane（シェル・コマンド実行）を非表示。ダッシュボード自身の pane は常に除外 |
+| `herdr.links` | `true`（既定）で pane id を OSC8 リンク化。TTY のときだけ有効で、Ctrl+click でその pane へ移動（[sources.md](sources.md)） |
 | `kpi.exclude` | dirty 件数から除外するパスの部分文字列 |
 | `extras` | 追加 KPI。`command` の stdout を 1 行で表示。**配列は exec、文字列は shell 経由**（パイプ可）。配列を推奨。失敗時は `!(理由)` を赤字表示 |
 | `watch_interval` | `watch` / `show` の更新秒数（既定 5） |
