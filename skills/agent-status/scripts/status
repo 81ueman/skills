@@ -30,7 +30,12 @@ DEFAULT_CONFIG = {
     "title": None,
     "subtitle": None,
     "relay": {"enabled": True, "db": None},
-    "plan": {"enabled": True, "path": f"{STATE_DIRNAME}/plan.json"},
+    "plan": {
+        "enabled": True,
+        "path": f"{STATE_DIRNAME}/plan.json",
+        # Phase 2（スタール表示）で使う既定しきい値。
+        "stall_after_minutes": 10,
+    },
     "herdr": {"enabled": True, "workspaces": [], "cwd_match": True, "show_shells": False, "links": True},
     "kpi": {"exclude": ["README.md", "catalog.json", "notes/", "papers/", "summaries/", ".agent-status/"]},
     "extras": [],
@@ -252,7 +257,7 @@ def read_relay(db):
     if not db:
         return None
     tasks = _sqlite_rows(
-        db, "SELECT id,title,state,priority,role,assignee,parent_task_id,updated_at FROM tasks")
+        db, "SELECT id,title,state,priority,role,assignee,parent_task_id,plan_id,updated_at FROM tasks")
     workers = _sqlite_rows(
         db, "SELECT id,role,state,current_task_id,generation,last_progress_at FROM workers")
     # Herdr placement per worker (used only for display grouping; absent on old DBs).
@@ -438,6 +443,87 @@ def _tree_order(items, key=None):
     return out
 
 
+# relay の task state -> plan 台帳の語彙（intent と突き合わせる observed 側の言い換え）。
+RELAY_TO_PLAN = {
+    "queued": "pending", "running": "working", "review": "review", "done": "done",
+    "blocked_internal": "blocked", "blocked_human": "blocked", "failed": "failed",
+}
+# 1 項目に複数タスクが紐づくときの代表状態（先勝ち）。
+RELAY_STATE_PRIORITY = ["blocked_human", "blocked_internal", "failed", "running", "review", "queued", "done"]
+# 子から親へ畳むときの優先順（先勝ち）。
+ROLLUP_PRIORITY = ["blocked", "working", "review", "failed", "pending", "done"]
+
+
+def parts_by_plan(relay_tasks):
+    """relay task を plan_id で束ねる（リンクは relay 側のデータ）。"""
+    by_plan = {}
+    for t in (relay_tasks or []):
+        pid = t.get("plan_id")
+        if pid:
+            by_plan.setdefault(pid, []).append(t)
+    return by_plan
+
+
+def unknown_plan_links(plan_tasks, relay_tasks):
+    """plan.json に存在しない plan_id を指している task（doctor 用）。"""
+    ids = {it.get("id") for it in plan_tasks}
+    return [(t.get("id"), t.get("plan_id")) for t in (relay_tasks or [])
+            if t.get("plan_id") and t.get("plan_id") not in ids]
+
+
+def derive_plan_state(plan_tasks, relay_tasks, cfg):
+    """plan の intent は残したまま、relay の plan_id から observed を導出して親へ畳む。
+
+    item に足すキー:
+      declared  : plan.json に書かれた intent の status
+      relay_ids : 紐づいた relay task の id（表示・`--json` 用）
+      observed  : relay から見た状態（紐付けが無ければ None）
+      effective : 表示に使う状態（observed → 子の rollup → declared の順）
+      source    : effective の出どころ（"relay" / "rollup" / "intent"）
+      drift     : effective と declared が食い違っているか
+
+    リンクは `relay task add --plan <plan-id>` / `relay task link` が tasks.plan_id に
+    保存した値だけで決まる（タイトルは見ない）。
+    """
+    by_plan = parts_by_plan(relay_tasks)
+
+    children = {}
+    for it in plan_tasks:
+        children.setdefault(it.get("parent"), []).append(it)
+
+    for it in plan_tasks:
+        it["declared"] = it.get("status") or "pending"
+        linked = by_plan.get(it.get("id")) or []
+        it["relay_ids"] = [t.get("id") for t in linked]
+        states = [t.get("state") or "queued" for t in linked]
+        it["observed"] = RELAY_TO_PLAN.get(
+            next((s for s in RELAY_STATE_PRIORITY if s in states), states[0]), states[0]) if states else None
+
+    # 深い方から畳む（親が子の effective を参照できる順）。
+    for it in sorted(plan_tasks, key=lambda x: -(x.get("depth") or 0)):
+        if it.get("observed"):
+            it["effective"], it["source"] = it["observed"], "relay"
+        else:
+            kids = children.get(it.get("id")) or []
+            # rollup は relay 由来の子だけから畳む。観測が 1 つも無いなら
+            # intent をそのまま出す（plan.json だけの repo を揺らさない）。
+            states = [k.get("effective") or "pending" for k in kids if k.get("source") != "intent"]
+            if states:
+                it["effective"] = next((s for s in ROLLUP_PRIORITY if s in states), states[0])
+                it["source"] = "rollup"
+            else:
+                it["effective"], it["source"] = it["declared"], "intent"
+        it["drift"] = it["effective"] != it["declared"]
+    return plan_tasks
+
+
+def plan_view(plan, relay_tasks, cfg):
+    items = [dict(it) for it in (plan.get("tasks") or [])]
+    for it, depth in _tree_order(items):
+        it["depth"] = depth
+    return derive_plan_state(items, relay_tasks, cfg)
+
+
 def collect(root, cfg, workspaces):
     relay = read_relay(find_relay_db(root, cfg))
     plan_path, plan = read_plan(root, cfg)
@@ -490,9 +576,7 @@ def collect(root, cfg, workspaces):
 
     plan_tasks = []
     if plan:
-        plan_tasks = [dict(it) for it in (plan.get("tasks") or [])]
-        for it, depth in _tree_order(plan_tasks):
-            it["depth"] = depth
+        plan_tasks = plan_view(plan, (relay or {}).get("tasks") or [], cfg)
 
     title = cfg.get("title") or Path(root).name
     return {
@@ -580,6 +664,11 @@ def _wrap_join(tokens, width):
     return out
 
 
+def _fit_tail(base, tail, width, reserve=6):
+    """tail を付けると本文が reserve 桁未満になるなら tail を落とす（折り返し防止）。"""
+    return tail if base + _dwidth(tail) + reserve <= width else ""
+
+
 def _term_width(default=120):
     """描画先の桁数。pane 内 (watch) では resize にも追従する。"""
     try:
@@ -648,11 +737,16 @@ def render_text(data, use_color, links=False, width=120):
             lines.append(c("  (none)", "gray"))
         for it in t["remaining"]:
             st = it["state"]
-            tag = color(f"{st:<16}", TASK_COLOR.get(st), use_color)
             owner = it.get("assignee") or it.get("role") or "-"
             indent = "  " * (it.get("depth") or 0)
-            tail = f"  [{owner}]"
-            used = 2 + len(indent) + 16 + 1 + 8 + 1 + _dwidth(tail)
+            # 狭い pane では owner → state の順に畳む（まず本文の余地を確保する）。
+            tag_w = 16
+            if width < 44:
+                tag_w, st, owner = 8, st[:8], None
+            tail = _fit_tail(2 + len(indent) + tag_w + 1 + 8 + 1,
+                             f"  [{owner}]" if owner else "", width)
+            tag = color(f"{st:<{tag_w}}", TASK_COLOR.get(it["state"]), use_color)
+            used = 2 + len(indent) + tag_w + 1 + 8 + 1 + _dwidth(tail)
             lines.append(f"  {indent}{tag} {it.get('id') or '?':<8} "
                          f"{_trim(it['title'], width - used)}{tail}")
 
@@ -670,14 +764,26 @@ def render_text(data, use_color, links=False, width=120):
 
     if data["plan"]:
         lines.append("")
-        lines.append(c("PLAN (" + (data.get("plan_title") or "manual") + ")", "bold"))
+        lines.append(c(_trim("PLAN (" + (data.get("plan_title") or "manual") + ")", width), "bold"))
         for it in data["plan"]:
-            st = (it.get("status") or "pending")
+            st = it.get("effective") or it.get("declared") or "pending"
             tag = color(f"{st:<10}", PLAN_COLOR.get(st, "gray"), use_color)
             indent = "  " * (it.get("depth") or 0)
-            tail = f"  [{it.get('owner') or '-'}]" + (f"  - {it['note']}" if it.get("note") else "")
-            used = 2 + len(indent) + 10 + 1 + _dwidth(tail)
-            lines.append(f"  {indent}{tag} {_trim(it.get('title') or '?', width - used)}{tail}")
+            tail = _fit_tail(2 + len(indent) + 10 + 1,
+                             f"  [{it.get('owner') or '-'}]" + (f"  - {it['note']}" if it.get("note") else ""),
+                             width)
+            fixed = 2 + len(indent) + 10 + 1 + _dwidth(tail)
+            # intent と observed が食い違う行だけ、末尾に宣言値を併記する。
+            mark = ""
+            if it.get("drift"):
+                ids = ",".join(it.get("relay_ids") or [])
+                candidate = f"  ←{it.get('declared')}" + (f" ({ids})" if ids else "")
+                # 併記のために本文が削られすぎるなら落とす（注記だけの行にしない）。
+                if fixed + _dwidth(candidate) + 6 <= width:
+                    mark = candidate
+            lines.append(f"  {indent}{tag} "
+                         f"{_trim(it.get('title') or '?', width - fixed - _dwidth(mark))}"
+                         f"{tail}{c(mark, 'yellow') if mark else ''}")
 
     workers = data.get("workers") or []
     by_pane = data.get("workers_by_pane") or {}
@@ -906,6 +1012,17 @@ def cmd_doctor(args, root, cfg, cfg_path):
         lines.append(f"  workers       {len(relay['workers'])} rows")
     lines.append(f"plan            {plan_path or '(not found)'}"
                  + (f"  tasks={len(plan.get('tasks', []))}" if plan else ""))
+    if plan:
+        derived = plan_view(plan, (relay or {}).get("tasks") or [], cfg)
+        linked = sum(1 for it in derived if it.get("relay_ids"))
+        drift = [it.get("id") for it in derived if it.get("drift")]
+        unknown = unknown_plan_links(derived, (relay or {}).get("tasks") or [])
+        lines.append(f"  links         {linked}/{len(derived)} items <- relay tasks"
+                     + (f"  drift={','.join(str(d) for d in drift)}" if drift else "  drift=none"))
+        if unknown:
+            lines.append("  unknown links "
+                         + ", ".join(f"{tid}->{pid}" for tid, pid in unknown)
+                         + "  (no such plan item)")
     agents = read_agents(cfg, root, args.workspaces)
     lines.append(f"herdr panes     {len(agents) if agents is not None else 'off'}")
     print("\n".join(lines))

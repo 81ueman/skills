@@ -13,7 +13,7 @@
   "title": "Egress ACL — executable end-to-end",
   "subtitle": "HD-4 / control → lowering → Rust|Go|C++ → vendor E2E",
   "relay": { "enabled": true, "db": null },
-  "plan":  { "enabled": true, "path": ".agent-status/plan.json" },
+  "plan":  { "enabled": true, "path": ".agent-status/plan.json", "stall_after_minutes": 10 },
   "herdr": { "enabled": true, "workspaces": ["w50", "w61"], "cwd_match": true, "show_shells": false, "links": true },
   "kpi":   { "exclude": ["README.md", "catalog.json", "notes/", "papers/", "summaries/", ".agent-status/"] },
   "extras": [
@@ -28,6 +28,8 @@
 | --- | --- |
 | `title` / `subtitle` | 見出し。未指定なら repo ディレクトリ名 |
 | `relay.db` | 明示したい relay DB パス（通常は自動探索でよい） |
+| `plan.path` | plan.json のパス（既定 `.agent-status/plan.json`） |
+| `plan.stall_after_minutes` | Phase 2（スタール表示）のしきい値。既定 10 |
 | `herdr.workspaces` | 跨いで見る Herdr workspace（`--workspace` で上書き追加） |
 | `herdr.cwd_match` | `<repo>` 配下の cwd の pane だけに絞る |
 | `herdr.show_shells` | `false`（既定）でエージェントの居ない pane（シェル・コマンド実行）を非表示。ダッシュボード自身の pane は常に除外 |
@@ -74,3 +76,22 @@ relay が使えるときは relay のタスクが表示の主役で、plan は�
 - 表示色: `done`=緑 / `working`=黄 / `delegated`=水 / `pending`=灰 / `blocked`・`failed`=赤。
 - 階層: `parent` に親タスクの `id` を書くとツリー表示（子は 2 スペース/段でインデント）。
   表記順は配列順。親が存在しない・不明な id は root（depth 0）扱い。
+
+### plan と relay の紐付け
+
+plan の `status` は **intent**（やるつもり）で、表示に使う状態は relay の observed を優先する。
+紐付けは **relay 側のデータ**（`tasks.plan_id`）だけで決まり、plan.json を編集する必要はない。
+
+```bash
+relay task add "Rust VRF" --plan A1     # 起票時に紐付ける
+relay task link T2 A1                   # 既存タスクへ後付け・修正
+relay task unlink T2                    # 外す
+```
+
+- plan item の `id` をそのまま書く（`A1`、`U1` など）。1 item に複数タスクがぶら下がってよい。
+- 導出順は `observed`（紐づく relay task の状態）→ 子の rollup → `declared`（plan.json の `status`）。
+  食い違う行だけ `←<declared> (<task ids>)` を併記する。
+- relay task の状態 → plan の状態: `running`→`working` / `review`→`review` / `queued`→`pending` /
+  `blocked_*`→`blocked` / `failed`→`failed` / `done`→`done`。
+- plan.json に無い `plan_id` を指すタスクは `status doctor` の `unknown links` に出る。
+- この紐付けを使わない（`status` を宣言値のまま表示する）こともできる。その場合は plan.json だけで動く。

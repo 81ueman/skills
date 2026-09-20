@@ -88,7 +88,8 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
 | w50/w61 など複数 workspace を跨ぐ | `status show --workspace w50 --workspace w61` |
 | relay がまだ無いリポジトリ | `.agent-status/plan.json` を置く（[references/config.md](references/config.md) のスキーマ） |
 | 表示を細かく変えたい（KPI 追加・除外） | `.agent-status/config.json` を編集 |
-| relay を読めているか不安 | `status doctor` で DB / 行数を確認 |
+| relay を読めているか不安 | `status doctor` で DB / 行数 / `links`（plan との紐付け数）を確認 |
+| plan の項目と relay タスクを紐付けたい | `relay task add "..." --plan <plan-id>`（起票時）/ `relay task link <task-id> <plan-id>`（後付け） |
 | タスクを進めたい | 本スキルではなく `relay next/note/submit`（`agent-worker` skill） |
 
 ## 表示の読み方
@@ -97,7 +98,13 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
 - `REMAINING` … `running → queued → review → blocked_* → failed` の順。各行は `state / id / title / [assignee]`。
   relay の `parent_task_id` があれば親子をツリー表示（子はインデント）。
 - `DONE (n)` … 完了タスク（最新 30 件）。階層があれば同じ段でインデント表示。
-- `PLAN` … plan.json の台帳。`parent` があればツリー表示。
+- `PLAN` … plan.json の台帳（intent）。`parent` があればツリー表示。
+  状態は **relay の observed を優先**して出す（`tasks.plan_id == item.id` の結合だけで決まり、
+  タイトルは見ない）。導出順は `observed`（紐づく relay task の状態）→ 子の rollup → `declared`。
+  intent と食い違う行だけ、行末に `←<declared> (<relay task ids>)` を黄色で併記する（幅が無ければ落とす）。
+  どの値が使われたかは `render --json` の `source`（`relay` / `rollup` / `intent`）で確認できる。
+  紐付けは `relay task add "..." --plan <plan-id>`（起票時）か `relay task link <task-id> <plan-id>`（後付け）。
+  未知の plan_id は `status doctor` が `unknown links` として報告する。
 - `AGENTS` … pane を骨格に relay worker を同じ行へ併記した統合ビュー（`workspace → tab → pane`）。
   行は `pane_id | Herdr の agent_status | relay worker | 現在タスク | 最終進捗 | タイトル`。
   worker ↔ pane は `worker_runtimes.pane_id` で対応付け、relay 管理外の pane は worker 以降が `-`（薄く表示）。
