@@ -482,6 +482,7 @@ def collect(root, cfg, workspaces):
                 "task": w.get("current_task_id"), "generation": w.get("generation"),
                 "idle_ms": int(now_ms - lp) if lp else None,
                 "workspace": rt.get("workspace_id"), "tab": rt.get("tab_id"),
+                "pane": rt.get("pane_id"),
             })
         # Group order = workspace, then worker id (regex-free; "~" sorts absent last).
         workers.sort(key=lambda x: (x.get("workspace") or "~", x["id"] or ""))
@@ -506,6 +507,7 @@ def collect(root, cfg, workspaces):
         "extras": read_extras(root, cfg),
         "tasks": tasks,
         "workers": workers,
+        "workers_by_pane": {w["pane"]: w for w in workers if w.get("pane")},
         "plan": plan_tasks,
         "plan_title": (plan or {}).get("title") if plan else None,
         "agents": agents or [],
@@ -585,22 +587,6 @@ def render_text(data, use_color, links=False):
         if len(t["done_list"]) > 30:
             lines.append(c(f"  ... +{len(t['done_list']) - 30} more", "gray"))
 
-    if data["workers"]:
-        lines.append("")
-        lines.append(c("RELAY WORKERS", "bold"))
-        groups = {}
-        for w in data["workers"]:
-            groups.setdefault(w.get("workspace"), []).append(w)
-        multi_ws = len(groups) > 1
-        for ws, ws_workers in groups.items():
-            if multi_ws:
-                lines.append(" " + c(ws or "-", "blue"))
-            indent = "    " if multi_ws else "  "
-            for w in ws_workers:
-                tag = color(f"{w['state']:<14}", WORKER_COLOR.get(w["state"]), use_color)
-                lines.append(f"{indent}{tag} {str(w['id']):<14} task={w.get('task') or '-'}  "
-                             f"gen={w.get('generation')}  last-progress {fmt_age(w.get('idle_ms'))}")
-
     if data["plan"]:
         lines.append("")
         lines.append(c("PLAN (" + (data.get("plan_title") or "manual") + ")", "bold"))
@@ -611,21 +597,36 @@ def render_text(data, use_color, links=False):
             lines.append(f"  {indent}{tag} {it.get('title') or '?'}  [{it.get('owner') or '-'}]"
                          + (f"  - {it['note']}" if it.get("note") else ""))
 
-    if data["sources"].get("herdr") is not None and data["agents"]:
+    workers = data.get("workers") or []
+    by_pane = data.get("workers_by_pane") or {}
+
+    def worker_cells(w):
+        """relay 列: worker id / 現在タスク / 最終進捗。relay 管理外の pane は "-" を薄く出す。"""
+        if not w:
+            return c(f"{'-':<16} {'-':<4} {'-':>4}", "gray")
+        return (f"{str(w.get('id') or '-')[:16]:<16} {str(w.get('task') or '-'):<4} "
+                f"{fmt_age(w.get('idle_ms')):>4}")
+
+    def agent_line(base, a):
+        tag = color(f"{a['agent_status']:<8}", AGENT_COLOR.get(a["agent_status"]), use_color)
+        star = "*" if a.get("focused") else " "
+        plain = a["pane_id"] or "?"
+        vis = f"{ANSI['underline']}{plain}{ANSI['reset']}" if links else plain
+        pid = link(vis, f"{PANE_LINK_BASE}{plain}", links)
+        pad = " " * max(0, 9 - len(plain))
+        return f"{base}{star}{pid}{pad} {tag} {worker_cells(by_pane.get(plain))}  {a['title'][:48]}"
+
+    def worker_lines(ws, ws_workers, indent):
+        for w in ws_workers:
+            tag = color(f"{w['state']:<14}", WORKER_COLOR.get(w["state"]), use_color)
+            lines.append(f"{indent}{tag} {str(w['id']):<16} task={w.get('task') or '-'}  "
+                         f"gen={w.get('generation')}  last-progress {fmt_age(w.get('idle_ms'))}")
+
+    if data["agents"]:
         lines.append("")
-        lines.append(c("HERDR PANES", "bold"))
+        lines.append(c("AGENTS", "bold"))
         groups = group_panes(data["agents"])
         multi_ws = len(groups) > 1
-
-        def pane_line(base, a):
-            tag = color(f"{a['agent_status']:<8}", AGENT_COLOR.get(a["agent_status"]), use_color)
-            star = "*" if a.get("focused") else " "
-            plain = a["pane_id"] or "?"
-            vis = f"{ANSI['underline']}{plain}{ANSI['reset']}" if links else plain
-            pid = link(vis, f"{PANE_LINK_BASE}{plain}", links)
-            pad = " " * max(0, 9 - len(plain))
-            return f"{base}{star}{pid}{pad} {tag}  {a['title'][:56]}"
-
         for w, tab_order, tabs in groups:
             if multi_ws:
                 lines.append(" " + c(w, "blue"))
@@ -635,15 +636,35 @@ def render_text(data, use_color, links=False):
                 if len(panes) == 1:
                     # 1 pane しかない tab は見出しもラベルも出さず、pane 行だけを 1 行で出す。
                     base = " " + ("  " if multi_ws else "")
-                    lines.append(pane_line(base, panes[0]))
+                    lines.append(agent_line(base, panes[0]))
                 else:
                     head = t + (f"  {tab_label}" if tab_label else "")
                     lines.append(" " + ("  " if multi_ws else "") + c(head, "blue"))
                     base = " " + "  " * ((1 if multi_ws else 0) + 1)
                     for a in panes:
-                        lines.append(pane_line(base, a))
+                        lines.append(agent_line(base, a))
+
+        # pane を持たない worker（未 spawn / cleanup 済み / cwd 不一致で pane が隠れている等）。
+        placed = {by_pane[a["pane_id"]].get("id") for a in data["agents"] if a.get("pane_id") in by_pane}
+        unplaced = [w for w in workers if w.get("id") not in placed]
+        if unplaced:
+            lines.append("")
+            lines.append(c("  UNPLACED WORKERS (no pane)", "bold"))
+            worker_lines(None, unplaced, "  ")
         if links:
             lines.append(color("  Ctrl+click a pane id → focus that pane", "dim", use_color))
+    elif workers:
+        # Herdr 未使用時は relay だけで描く（worker の居場所でまとめる）。
+        lines.append("")
+        lines.append(c("RELAY WORKERS", "bold"))
+        groups = {}
+        for w in workers:
+            groups.setdefault(w.get("workspace"), []).append(w)
+        multi_ws = len(groups) > 1
+        for ws, ws_workers in groups.items():
+            if multi_ws:
+                lines.append(" " + c(ws or "-", "blue"))
+            worker_lines(ws, ws_workers, "    " if multi_ws else "  ")
 
     lines.append("")
     src = []

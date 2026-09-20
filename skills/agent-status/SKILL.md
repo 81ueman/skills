@@ -94,15 +94,17 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
   relay の `parent_task_id` があれば親子をツリー表示（子はインデント）。
 - `DONE (n)` … 完了タスク（最新 30 件）。階層があれば同じ段でインデント表示。
 - `PLAN` … plan.json の台帳。`parent` があればツリー表示。
-- `RELAY WORKERS` … `relay` の worker 状態と最終進捗からの経過時間。Herdr 上の配置
-  （`worker_runtimes.workspace_id`）で workspace ごとにまとめ、workspace が複数のときだけ見出しを出す。
-- `HERDR PANES` … `workspace → tab → pane` の階層で表示。pane ごとの `agent_status`（working/idle/blocked/unknown）、`*` はフォーカス中。
+- `AGENTS` … pane を骨格に relay worker を同じ行へ併記した統合ビュー（`workspace → tab → pane`）。
+  行は `pane_id | Herdr の agent_status | relay worker | 現在タスク | 最終進捗 | タイトル`。
+  worker ↔ pane は `worker_runtimes.pane_id` で対応付け、relay 管理外の pane は worker 以降が `-`（薄く表示）。
+  pane を持たない worker は末尾に `UNPLACED WORKERS (no pane)` として出す。
   workspace が複数あるときだけ見出しを出し、tab 見出しは pane が 2 つ以上あるときだけ。
   pane が 1 つだけの tab は pane 行だけの 1 行にし、縦を節約する。
   エージェントの居ない pane（シェル等）とダッシュボード自身の pane は既定で非表示（`herdr.show_shells` で表示）。
   pane id を **Ctrl+click** するとその pane にフォーカスが移る（要プラグイン link、`herdr.links=false` で無効化）。
   pane id はリンクとして下線付きで表示し、末尾に `Ctrl+click a pane id → focus that pane` のヒント行を出す。
   戻るときは Herdr の `keys.last_pane`（例 `prefix+semicolon`）で直前の pane へトグルする。
+  Herdr 未使用時は `RELAY WORKERS` として worker だけを workspace ごとに表示する。
 - `sources` … relay / herdr / plan のどれを採用したか。
 
 ## アンチパターン

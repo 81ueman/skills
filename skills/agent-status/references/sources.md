@@ -22,9 +22,9 @@
 - 階層: `parent_task_id` があれば親子を **ツリー表示**（子は 2 スペース/段でインデント）。
   兄弟は上記の state/priority 順。親が存在しない孤児や循環参照は depth 0 に落として必ず表示する。
   `done` の子も所属段は保たれる（残り/完了のセクションをまたいでもインデントは維持）。
-- worker の階層: `workers` に親子列は無いので、**Herdr 上の配置**（`worker_runtimes` の
-  `workspace_id`、同一 worker は generation 最大→`created_at` 最新の行）で workspace ごとに
-  まとめる。workspace が複数のときだけ見出しを出し、無い worker は `-` にまとめる。
+- worker の表示: `worker_runtimes` の `pane_id` で pane に **1:1 対応付け**し、`AGENTS` の pane 行に
+  併記する（同一 worker は generation 最大→`created_at` 最新の行を採用）。pane が無い worker は
+  `UNPLACED WORKERS (no pane)` に出す。Herdr 未使用時だけ `RELAY WORKERS` として `workspace_id` ごとに表示する。
 
 将来 relay が `relay status --json` などを公開したら、それを優先する実装に差し替える。
 
