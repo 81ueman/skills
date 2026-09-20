@@ -51,3 +51,4 @@ relay が使えるときは relay のタスクが表示の主役で、plan は�
 
 - ルートを配列にしてもよい（`[{...}, {...}]`）。
 - `status` は `done working delegated pending blocked` を想定（未知の値はグレー表示）。
+- 表示色: `done`=緑 / `working`=黄 / `delegated`=水 / `pending`=灰 / `blocked`・`failed`=赤。

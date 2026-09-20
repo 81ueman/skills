@@ -48,6 +48,12 @@ TASK_COLOR = {
     "running": "green", "queued": "cyan", "review": "yellow",
     "blocked_human": "red", "blocked_internal": "magenta", "failed": "red", "done": "gray",
 }
+# plan 台帳（done/working/delegated/pending/blocked）用
+PLAN_COLOR = {
+    "done": "green", "working": "yellow", "delegated": "cyan",
+    "pending": "gray", "blocked": "red", "failed": "red",
+    "running": "green", "queued": "cyan", "review": "yellow",
+}
 WORKER_COLOR = {
     "working": "green", "idle": "gray", "waiting_input": "yellow",
     "stalled": "red", "dead": "red", "starting": "cyan",
@@ -423,7 +429,7 @@ def render_text(data, use_color):
         lines.append(c("PLAN (" + (data.get("plan_title") or "manual") + ")", "bold"))
         for it in data["plan"]:
             st = (it.get("status") or "pending")
-            tag = color(f"{st:<10}", TASK_COLOR.get(st) or "gray", use_color)
+            tag = color(f"{st:<10}", PLAN_COLOR.get(st, "gray"), use_color)
             lines.append(f"  {tag} {it.get('title') or '?'}  [{it.get('owner') or '-'}]"
                          + (f"  - {it['note']}" if it.get("note") else ""))
 
