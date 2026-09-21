@@ -1,6 +1,6 @@
 ---
 name: agent-status
-description: Herdr上で複数エージェントが並行作業しているときのライブ進捗ダッシュボードを、呼び出し中のpaneの隣に表示する。relay（SQLite が正本）のタスク台帳とHerdrのpane/agent状態、gitのKPIを集約し、残りタスク・完了タスク・worker状態をANSIで自動更新表示する。「進捗を見せて」「状況は」「ダッシュボード出して」「残りタスク一覧」「タスクの進み具合」「agent-status」などで使う。
+description: Relay control plane の read-only ダッシュボードを、呼び出し中の pane の隣に表示する。Relay (SQLite) の task tree / worker / runtime を正本とし、Herdr の実行状態（busy/idle）を重ね、git を補助 KPI として ANSI で自動更新する。「進捗を見せて」「状況は」「ダッシュボード出して」「残りタスク一覧」「タスクの進み具合」「agent-status」などで使う。
 slash: true
 ---
 
@@ -8,18 +8,33 @@ slash: true
 
 ## 概要
 
-複数エージェント（Herdr の別 pane / relay worker）にまたがる作業の進捗を 1 画面に集約し、
-**残りタスク・完了タスク・各 worker/agent の状態**を一目で見えるようにする。常駐はせず、
-明示的に呼び出したときだけ Herdr ペインを 1 枚開いて自動更新する。
+**Relay を正本とする read-only ダッシュボード**。複数エージェント（Relay worker / Herdr pane）に
+またがる作業を 1 画面に集約する。常駐はせず、明示的に呼び出したときだけ Herdr ペインを 1 枚開いて自動更新する。
 
-タスクの正本は **relay（SQLite: `<repo>/.relay/state.db`）**。
-Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。本スキルは表示専用で、
-タスクの追加・claim・submit などは行わない（それは `relay` CLI の仕事）。
-表示中に `.agent-status/config.json` を編集すると次の更新で反映される（pane 再起動不要）。
+```
+agent-status = Relay control plane の read-only projection
+             + Herdr の live execution overlay
+             + git の軽い補助情報
+```
+
+原則:
+
+```
+Relay is the source of truth.
+Workers are peers.
+Tasks may form a parent/child work-decomposition tree (not an agent hierarchy).
+Herdr is execution telemetry, not work state.
+agent-status only observes and renders.
+```
+
+**Relay は必須**。`.relay/state.db` が無ければ明確に失敗する（`relay init` を促す）。計画台帳の
+fallback は持たない — 仕事の構造は Relay の task tree だけで表現する。本スキルは表示専用で、
+タスクの追加・claim・submit・wake・message 送信などは一切行わない（それは `relay` CLI の仕事）。
+DB は **`mode=ro`（read-only）** でしか開かない。
 
 ## いつ使うか
 
-- 統括エージェントとして複数の部下へ委譲しており、残タスク/完了タスクを俯瞰したいとき
+- 複数 worker にまたがる作業の残タスク/完了/attention を俯瞰したいとき
 - 単独作業でも、自分の pane の隣に進捗を出しておきたいとき
 - 「進捗を見せて」「状況は」「ダッシュボード出して」「残りタスクは」と言われたとき
 - 手動起動: `/agent-status`
@@ -27,23 +42,18 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
 ## 前提
 
 - Herdr 内で実行していること（`HERDR_ENV=1`）。ペイン表示は Herdr 必須。
-- タスク台帳は relay が動いているリポジトリの `<repo>/.relay/state.db`。
-  DB は **read-only** でしか読まない（WAL への書き込みをしない）。
-- relay が無いリポジトリでは `.agent-status/plan.json`（手書き）にフォールバックする。
-  どちらも無ければタスク欄は空表示になる（推測で埋めない）。
-- pane id の **Ctrl+click 移動**を使うには、Herdr プラグインを一度 link しておく（任意）:
+- Relay の control plane が存在すること: `<repo>/.relay/state.db`（`relay init`）。
+- pane id の **Ctrl+click 移動**を使うには Herdr プラグインを一度 link しておく（任意）:
 
   ```bash
   herdr plugin link ~/.agents/skills/agent-status/herdr-plugin   # プラグイン id: agent-status.pane-links
   ```
 
-  link しなくても階層表示は動く（pane id はリンクとして描画されるが、Ctrl+click は Herdr に拾われない）。
-
 ## 手順
 
-入口は `scripts/status`（Python3 stdlib のみ）。スキルディレクトリからの相対パスで呼ぶ。
+入口は `scripts/status`（Python3 stdlib のみ）。
 
-1. まず検出状態を確認する（どのソースが使われるか）:
+1. 検出状態を確認する（Relay / Herdr が使えるか）:
 
    ```bash
    python3 scripts/status doctor --repo "$PWD"
@@ -53,117 +63,73 @@ Herdr は pane/agent のライブ状態、git は補助 KPI を提供する。�
 
    ```bash
    python3 scripts/status show --repo "$PWD"
-   # 統括エージェントの pane を指定してその隣に出す場合
    python3 scripts/status show --pane w52:p2M --direction right --repo "$PWD"
-   # 他の pane を分割せず、独立した tab で出す場合
-   python3 scripts/status show --tab --repo "$PWD"
+   python3 scripts/status show --tab --repo "$PWD"        # 独立 tab（他 pane を分割しない）
    ```
 
-   - 既定は「呼び出し元 pane の右」。既存の status pane があれば**再利用**する（位置は変わらない。移すときは `hide` → `show`）。
-   - `--tab` で専用 tab に出す（既定ラベル `agent-status`。`--tab-label` / `--tab-workspace` で変更可）。既存 pane を分割しない。
+   - 既存の status pane があれば**再利用**する（移すときは `hide` → `show`）。
    - 対象 workspace を明示する場合は `--workspace w50 --workspace w61`（複数可）。
-   - 既定の対象は現在の `$HERDR_WORKSPACE_ID` かつ `<repo>` 配下の cwd を持つ pane。
 
-3. 止めるとき:
+3. 止める / 一回だけ見る / 機械可読:
 
    ```bash
    python3 scripts/status hide --repo "$PWD"
-   ```
-
-4. pane を開かず 1 回だけ見る / 機械可読が欲しいとき:
-
-   ```bash
    python3 scripts/status render --repo "$PWD"
    python3 scripts/status render --json --repo "$PWD"
-   python3 scripts/status watch --repo "$PWD" --interval 5   # pane 内で直接回す用
+   python3 scripts/status watch --repo "$PWD" --interval 5
    ```
+
+## 表示の読み方
+
+- ヘッダ: `relay / <repo>` と `<branch> <head>`、続いて `N tasks  D done  R running  Q queued …` の要約。
+- `WORK` … **Relay の task tree**（`parent_task_id`）。work decomposition であり、worker の上下関係ではない。
+  - 並び: 同一 parent 配下で **active が先 → priority 降順 → id 固定**（refresh でガタつかない）。
+  - `done` は dim。`running` は緑、`review` は黄、`blocked_*` / `failed` は目立つ色。
+  - 全子孫が done の subtree は 1 行に畳む（`✓ T12 … (5/5 done)`）。同階層の done が続く場合も
+    `✓ … +94 done` のように畳む（active branch を優先）。
+  - 行は `state / id / title / role / [assignee]`。狭い pane では role→owner の順に落とす。
+- `WORKERS` … **Relay worker が主体**。`worker / Relay state / Herdr 実行状態 / current task / progress`。
+  - **Relay worker state**（`starting idle working waiting_input stalled dead`）と
+    **Herdr 実行状態**（`busy idle !idle unavailable`、`quiet <残り>`）は**別の列**。混ぜない。
+  - `!idle` は「Relay は working＋タスク保持なのに Herdr が idle、quiet リーズも無い」= unexpected idle。
+  - `quiet <残り>` は Relay の bounded quiet lease（`relay wait`）中の意図的 idle。正常表示。
+- `ATTENTION` … derived な警告のみ（DB には書かない）。無ければ `none`。例:
+  `! dp-2  T9 working but runtime idle, no quiet lease  2m14s` /
+  `! T14 unclaimable role=rust-perf` / `! reviewer-2 dead generation=4` /
+  `! T19 blocked_human: <reason>` / `! worker-3 unread messages=2` /
+  `! worker-x supervised worker has no visible runtime pane`。
+- `RUNTIMES` … worker 主体の一覧: `worker / g<世代> / pane / Herdr agent_status`。
+  pane id を **Ctrl+click** するとその pane にフォーカス（要プラグイン link、`herdr.links=false` で無効）。
+  戻るときは Herdr の `keys.last_pane`（例 `prefix+semicolon`）。
+- `sources` … `relay:<name>` と `herdr:on|off`。
+- **幅の扱い**: pane 幅に合わせて全行を 1 行に収める（**全角は 2 桁**）。狭いときは role→priority→
+  progress→generation→workspace の順に落とし、`RUNTIMES` 自体を省略する。resize に追従する。
 
 ## 判断基準
 
 | 条件 | どうする |
 | --- | --- |
-| 統括 pane の隣に出したい | `status show --pane <統括pane>` |
 | 自分（呼び出し元）の隣でよい | `status show` |
+| 統括に相当する pane の隣に出したい | `status show --pane <その pane>` |
 | どの pane も分割せず独立 tab にしたい | `status show --tab` |
-| w50/w61 など複数 workspace を跨ぐ | `status show --workspace w50 --workspace w61` |
-| relay がまだ無いリポジトリ | `.agent-status/plan.json` を置く（[references/config.md](references/config.md) のスキーマ） |
-| 表示を細かく変えたい（KPI 追加・除外） | `.agent-status/config.json` を編集 |
-| relay を読めているか不安 | `status doctor` で DB / 行数 / `links`（plan との紐付け数）を確認 |
-| plan の項目と relay タスクを紐付けたい | `relay task add "..." --plan <plan-id>`（起票時）/ `relay task link <task-id> <plan-id>`（後付け） |
+| 複数 workspace を跨ぐ | `status show --workspace w50 --workspace w61` |
+| Relay がまだ無い | `relay init`（本スキルは fallback を持たない） |
+| 表示を変えたい（KPI 追加・除外） | `.agent-status/config.json` を編集 |
+| Relay を読めているか不安 | `status doctor`（relay db / tasks / workers / runtimes / runtime links / daemon socket） |
 | タスクを進めたい | 本スキルではなく `relay next/note/submit`（`agent-worker` skill） |
-
-## 運用（PLAN と relay をずらさない）
-
-plan.json の `status` は**宣言（intent）**、表示に使う状態は relay（observed）。両者をつなぐのは
-`tasks.plan_id` だけなので、**起票側が `--plan <plan-id>` を渡す**のが運用の起点になる。
-
-1. plan.json に項目を足したら、対応する relay task は `--plan` 付きで起票する:
-
-   ```bash
-   relay task add "Rust VRF" --plan A1 --role dataplane-rust
-   ```
-
-2. 定期的に `doctor` を見て、紐付けの穴を潰す:
-
-   ```bash
-   python3 scripts/status doctor --repo "$PWD"
-   #   links         6/19 items <- relay tasks  drift=A1,A2,A5,B
-   #   unlinked      B1,B2,B3,B4  (in-flight but no relay task; shown from intent only)
-   ```
-
-   - `links` … 何項目が relay と繋がっているか。`drift` は宣言と実態が食い違う項目。
-   - `unlinked` … 「進行中」と宣言しているのに紐づくタスクが無い項目。この行の状態は plan.json を
-     書いた時点で止まる。ただし親タスク 1 本で下位項目をまとめて進めている場合、子が `unlinked` に
-     出ても実害は無い（気になるなら子にも `--plan` 付きで起票して粒度を揃える）。
-   - `unknown links` … plan.json に無い id を指しているタスク（打ち間違い）。
-
-3. 起票後に気づいたとき、plan id を変えたいときは `relay task link <task-id> <plan-id>` /
-   `relay task unlink <task-id>` で直す。
-
-ダッシュボードの `PLAN` は observed 優先なので、**plan.json の `status` を書き換えなくても表示は実態に追従**する。
-書き戻しは行わない（plan.json は人間の成果物として残す）。
-
-## 表示の読み方
-
-- `tasks done/total [####----]` … relay の `done` 件数と全件数、プログレスバー。
-- `REMAINING` … `running → queued → review → blocked_* → failed` の順。各行は `state / id / title / [assignee]`。
-  relay の `parent_task_id` があれば親子をツリー表示（子はインデント）。
-- `DONE (n)` … 完了タスク（最新 30 件）。階層があれば同じ段でインデント表示。
-- `PLAN` … plan.json の台帳（intent）。`parent` があればツリー表示。
-  状態は **relay の observed を優先**して出す（`tasks.plan_id == item.id` の結合だけで決まり、
-  タイトルは見ない）。導出順は `observed`（紐づく relay task の状態）→ 子の rollup → `declared`。
-  intent と食い違う行だけ、行末に `←<declared> (<relay task ids>)` を黄色で併記する（幅が無ければ落とす）。
-  どの値が使われたかは `render --json` の `source`（`relay` / `rollup` / `intent`）で確認できる。
-  紐付けは `relay task add "..." --plan <plan-id>`（起票時）か `relay task link <task-id> <plan-id>`（後付け）。
-  未知の plan_id は `status doctor` が `unknown links` として報告する。
-- `AGENTS` … pane を骨格に relay worker を同じ行へ併記した統合ビュー（`workspace → tab → pane`）。
-  行は `pane_id | Herdr の agent_status | relay worker | 現在タスク | 最終進捗 | タイトル`。
-  worker ↔ pane は `worker_runtimes.pane_id` で対応付け、relay 管理外の pane は worker 以降が `-`（薄く表示）。
-  pane を持たない worker は末尾に `UNPLACED WORKERS (no pane)` として出す。
-  workspace が複数あるときだけ見出しを出し、tab 見出しは pane が 2 つ以上あるときだけ。
-  pane が 1 つだけの tab は pane 行だけの 1 行にし、縦を節約する。
-  エージェントの居ない pane（シェル等）とダッシュボード自身の pane は既定で非表示（`herdr.show_shells` で表示）。
-  pane id を **Ctrl+click** するとその pane にフォーカスが移る（要プラグイン link、`herdr.links=false` で無効化）。
-  pane id はリンクとして下線付きで表示し、末尾に `Ctrl+click a pane id → focus that pane` のヒント行を出す。
-  戻るときは Herdr の `keys.last_pane`（例 `prefix+semicolon`）で直前の pane へトグルする。
-  Herdr 未使用時は `RELAY WORKERS` として worker だけを workspace ごとに表示する。
-- `sources` … relay / herdr / plan のどれを採用したか。
-- **幅の扱い**: pane 幅（`os.get_terminal_size`）に合わせて全行を 1 行に収める。**全角は 2 桁**として数え、
-  溢れるタイトルは `…` で切る。狭いときは relay 列を段階的に畳み（`worker / 現在タスク / 最終進捗` →
-  `worker` のみ → なし）、`tasks …` の状態内訳は別行へ、バーも縮める。resize にも追従する。
 
 ## アンチパターン
 
 - `HERDR_ENV != 1` で `status show` を呼ぶ（ペインを作れない。`render` を使う）
-- relay DB を書き込みモードで開く・`relay` のタスクを本スキルから更新する（表示専用）
-- relay が無いのにタスク欄を推測で埋める（空のまま出す）
-- 自分の作った status pane 以外を `hide` で閉じる（本スキルは追跡中の pane だけを閉じる）
-- 常駐させるために daemon 化する（常時起動はしない。必要なときだけ `show`/`hide`）
+- Relay DB を書き込みモードで開く / 本スキルから `relay` コマンドを実行する（表示専用・read-only）
+- Relay が無いのにタスク欄を推測で埋める（本スキルは**失敗する**）
+- 自分の作った status pane 以外を `hide` で閉じる（追跡中の pane だけを閉じる）
+- 常駐させるために daemon 化する（必要なときだけ `show`/`hide`）
 
 ## 参考
 
-- データソースの詳細: [references/sources.md](references/sources.md)
-- config スキーマと plan フォーマット: [references/config.md](references/config.md)
+- データソース: [references/sources.md](references/sources.md)
+- config スキーマ: [references/config.md](references/config.md)
 - 設定雛形: [templates/config.json](templates/config.json)
-- Ctrl+click で pane へ移動する Herdr プラグイン: [herdr-plugin/](herdr-plugin/)（`[[link_handlers]]` + socket `pane.focus`）
+- Ctrl+click プラグイン: [herdr-plugin/](herdr-plugin/)
 - relay 本体: `~/ghq/github.com/81ueman/relay`（SQLite が正本）

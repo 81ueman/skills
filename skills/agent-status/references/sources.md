@@ -1,77 +1,61 @@
 # データソース
 
-`scripts/status` が読むのは次の4つ。互いに独立して失敗する（1つ読めなくても他は表示する）。
+## 1. Relay（必須・read-only・正本）
 
-## 1. relay（タスクの正本）
+`<repo>/.relay/state.db` を **`mode=ro`** で開く。書き込み・`relay` コマンド実行は一切しない。
 
-- DB 探索順: config `relay.db` → `$RELAY_DB` → `<repo>` から親方向に `.relay/state.db` を探索。
-- 読み取り: Python stdlib `sqlite3` を `file:<path>?mode=ro`（read-only）で開く。
-  失敗時は `sqlite3 -readonly -json` CLI にフォールバック。**書き込みは一切しない。**
-- 使うテーブルと列（relay の `src/schema.ts` 準拠）:
-
-  | テーブル | 列 |
-  | --- | --- |
-  | `tasks` | `id, title, state, priority, role, assignee, parent_task_id, updated_at` |
-  | `workers` | `id, role, state, current_task_id, generation, last_progress_at`。`retired_at` 列があれば retired を除外（relay `worker retire` の tombstone） |
-  | `worker_runtimes` | `worker_id, generation, created_at, workspace_id, tab_id, pane_id, runtime_id`（worker の階層表示用。古い DB に無ければ無視） |
+| テーブル | 読む列 |
+| --- | --- |
+| `tasks` | `id, title, state, priority, role, assignee, parent_task_id, updated_at` |
+| `workers` | `id, role, state, current_task_id, generation, last_progress_at`（+ `quiet_until, quiet_reason` / `retired_at` があれば） |
+| `worker_runtimes` | `worker_id, generation, state, relay_owned, workspace_id, tab_id, pane_id, runtime_id, session_id, created_at` |
+| `messages` | `recipient, state`（未読数だけ。本文は読まない） |
+| `task_notes` | `blocked_human` / `blocked_internal` の最新理由（ATTENTION 用） |
 
 - task state: `queued running review done blocked_internal blocked_human failed`
 - worker state: `starting idle working waiting_input stalled dead`
-- 表示順（残り）: `running → queued → review → blocked_human → blocked_internal → failed`、
-  同 state 内は priority 降順。`done` は完了欄。
-- 階層: `parent_task_id` があれば親子を **ツリー表示**（子は 2 スペース/段でインデント）。
-  兄弟は上記の state/priority 順。親が存在しない孤児や循環参照は depth 0 に落として必ず表示する。
-  `done` の子も所属段は保たれる（残り/完了のセクションをまたいでもインデントは維持）。
-- worker の表示: `worker_runtimes` の `pane_id` で pane に **1:1 対応付け**し、`AGENTS` の pane 行に
-  併記する（同一 worker は generation 最大→`created_at` 最新の行を採用）。pane が無い worker は
-  `UNPLACED WORKERS (no pane)` に出す。Herdr 未使用時だけ `RELAY WORKERS` として `workspace_id` ごとに表示する。
-  relay 側で retire 済み（`workers.retired_at` が非 NULL）の worker は、履歴として行は残るが
-  ここには出さない。
-- 表示する workspace は `herdr.workspaces` **と** relay の `worker_runtimes.workspace_id` の和。
-  pane を新しい workspace へ移したときに config の更新漏れで worker が `UNPLACED` に落ちるのを防ぐ。
-  `--workspace` を渡したときは自動追加せず、その範囲だけを見る。
+- `retired_at IS NOT NULL` の worker は表示しない。
+- 列の有無は `PRAGMA table_info` で guard する（古い Relay DB でも動く）。
 
-将来 relay が `relay status --json` などを公開したら、それを優先する実装に差し替える。
+### 導出（agent-status の表示ラベル、DB には書かない）
 
-## 2. Herdr（pane / agent のライブ状態）
+- **task tree**: `tasks.parent_task_id` で親子に並べる。work decomposition であり worker の上下関係ではない。
+  active → priority 降順 → id 固定。全子孫が done の subtree は 1 行に畳む。
+- **exec label**（Herdr 実行状態。Relay state とは別列）:
+  - Herdr が `working` → `busy`
+  - Relay の `quiet_until > now` → `quiet <残り>`（意図的な bounded idle）
+  - Relay state が `working`＋タスク保持＋Herdr idle → `!idle`（unexpected idle）
+  - それ以外 → `idle` / `unavailable`（Herdr off）
+- **ATTENTION**（derived のみ）: unexpected idle / `stalled` / `dead` / starting 長期化 /
+  unclaimable（role を担う worker が居ない queued）/ `blocked_*` / `failed` / 未読メッセージ /
+  runtime pane を持たない worker。
+- **task progress**: `done/total` 件数と state 内訳。git は progress の正本にしない。
+
+## 2. Herdr（実行テレメトリ）
 
 - `HERDR_ENV=1` のときだけ有効。`herdr pane list --workspace <ws>` を対象 ws ごとに実行。
-- JSON の `result.panes[]` から使うフィールド:
-  `pane_id, agent, agent_status, terminal_title_stripped, cwd, workspace_id, tab_id, focused`
-- tab ラベルは `herdr tab list --workspace <ws>` の `result.tabs[]`（`tab_id, label`）から引く。
-- 対象 ws の決定順:
-  1. `--workspace`（複数可）
-  2. config `herdr.workspaces`
-  3. `$HERDR_WORKSPACE_ID`
-- `herdr.cwd_match = true`（既定）なら、集めた pane のうち `cwd` が `<repo>` 配下のものだけに絞る。
-- `herdr.show_shells = false`（既定）なら、`agent` を持たない pane（シェルやコマンド実行中の pane）は除外する。
-  これによりダッシュボード自身の pane（エージェント無し）が `unknown` として混ざらない。`true` で全 pane を表示。
-- 追跡中の status pane（`.agent-status/status-pane`）は常に除外する。
-- **階層表示**: `workspace → tab → pane` の順にグループ化する。
-  - workspace が複数あるときだけ workspace 見出しを出す。
-  - tab 見出しは **その tab に pane が 2 つ以上あるときだけ**出す（`tab_id` と label）。
-  - pane が 1 つだけの tab は見出しもラベルも出さず、pane 行だけを **1 行**にする（縦を節約）。
-  - pane 行は見出しの段数だけインデントする。
-- **Ctrl+click でその pane へ移動**: pane id を OSC8 ハイパーリンク
-  `https://agent-status.local/pane/<pane_id>` で包む（`herdr.links=true` かつ TTY のときのみ）。
-  [../herdr-plugin/](../herdr-plugin/) の Herdr プラグイン `agent-status.pane-links` の
-  `[[link_handlers]]` が **Control+click**（全 platform で Control）を拾い、socket API
-  `pane.focus {pane_id}` でその pane にフォーカスする。CLI の `herdr pane focus` は
-  方向（`--direction`）しか受け付けず絶対指定できないため、socket を直接使う。
-- **戻る**: Herdr の `keys.last_pane`（既定 unset）を使う。例 `last_pane = "prefix+semicolon"`。
-  全 workspace/tab をまたいで「直前の pane」へトグルできる。`pane.focus` は Herdr 側の
-  last-pane 履歴（`record_pane_focus_change`）に記録されるため、リンクで飛んだ後も戻れる。
-- pane 確保・停止に使うコマンド:
-  `herdr pane split --pane <id> --direction right|down --cwd <dir> --no-focus` /
-  `herdr pane run <id> <cmd>` / `herdr pane get <id>` / `herdr pane close <id>`
+- 対象 ws は `herdr.workspaces` ∪ relay の `worker_runtimes.workspace_id`（自動追従）。
+- `herdr.cwd_match` で `<repo>` 配下に絞る。ダッシュボード自身の pane は常に除外。
+- 既定では Relay 管理外の pane（シェル等）は表示しない（`herdr.show_unmanaged` で表示）。
+- 各 pane から `agent_status`（`working` / `idle` / `done` / `blocked` / `unknown`）を実行状態として読む。
+  **これは work state ではなく実行テレメトリ**。worker は `worker_runtimes.pane_id` で対応付ける。
+- pane id は OSC8 リンク（`herdr.links`）。Ctrl+click は Herdr プラグイン（`herdr-plugin/`）が
+  socket `pane.focus` に回す。
 
-## 3. git（KPI）
+## 3. git（補助 KPI）
 
-- `git log -1 --format='%h %s'` / `git rev-parse --abbrev-ref HEAD` / `git status --porcelain`
-- dirty 件数は config `kpi.exclude` に部分一致するパスを除いて数える
-  （既定で `README.md catalog.json notes/ papers/ summaries/ .agent-status/` を除外）。
+- `branch` / `HEAD`（`<sha> <subject>`）/ dirty 件数（`kpi.exclude` で除外）。
+- task progress の正本ではない。表示専用。
 
-## 4. plan（フォールバック）
+## 4. `status doctor`
 
-- config `plan.path`（既定 `.agent-status/plan.json`）。relay と併記可能。
-- スキーマは [config.md](config.md) を参照。
+```
+repo / config / HERDR_ENV
+relay db      OK <path> | (not found - run: relay init)
+tasks / workers / runtimes
+runtime links <pane を持つ worker>/<worker 数>
+daemon/socket OK <sock> | (no socket)
+herdr         OK (<n> panes) | off
+```
+
+`plan` / `drift` / `unlinked` / `unknown plan ids` は**廃止**。

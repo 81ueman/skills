@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
-"""agent-status - live progress dashboard over relay (relay/SQLite) + Herdr.
+"""agent-status - a read-only dashboard for a Relay control plane.
 
-Sources, best-effort and independent:
-  relay   : read-only view of <repo>/.relay/state.db (tasks / workers)
-  herdr   : `herdr pane list` for the relevant workspaces (live agent state)
-  git     : HEAD / branch / dirty count (KPI)
-  plan    : optional hand-written .agent-status/plan.json fallback
+Sources:
+  relay : READ-ONLY view of <repo>/.relay/state.db (tasks / workers / runtimes /
+          messages). REQUIRED - this is the source of truth.
+  herdr : live execution telemetry (`herdr pane list`): busy/idle per pane.
+  git   : HEAD / branch / dirty count (light KPI only).
+
+agent-status never mutates Relay state: no task/worker/message writes, no relay
+commands. It is an observer.
+
+    Relay is the source of truth.
+    Workers are peers. Tasks may form a tree.
+    Herdr is execution telemetry, not work state.
 
 Subcommands: render (default), watch, show, hide, doctor.
 No third-party dependencies; Python 3.8+ stdlib only.
@@ -29,14 +36,16 @@ WATCH_DEFAULT = 5
 DEFAULT_CONFIG = {
     "title": None,
     "subtitle": None,
-    "relay": {"enabled": True, "db": None},
-    "plan": {
+    # Relay is required; only the DB location is configurable.
+    "relay": {"db": None},
+    "herdr": {
         "enabled": True,
-        "path": f"{STATE_DIRNAME}/plan.json",
-        # Phase 2（スタール表示）で使う既定しきい値。
-        "stall_after_minutes": 10,
+        "workspaces": [],
+        "cwd_match": True,
+        "links": True,
+        # Debug only: also show Herdr/OpenCode panes Relay does not manage.
+        "show_unmanaged": False,
     },
-    "herdr": {"enabled": True, "workspaces": [], "cwd_match": True, "show_shells": False, "links": True},
     "kpi": {"exclude": ["README.md", "catalog.json", "notes/", "papers/", "summaries/", ".agent-status/"]},
     "extras": [],
     "watch_interval": WATCH_DEFAULT,
@@ -49,25 +58,18 @@ ANSI = {
     "blue": "\033[34m", "magenta": "\033[35m", "cyan": "\033[36m", "gray": "\033[90m",
 }
 
+# Relay task states, most-attention-worthy first (render order for counts).
 TASK_ORDER = ["running", "queued", "review", "blocked_human", "blocked_internal", "failed"]
 TASK_COLOR = {
     "running": "green", "queued": "cyan", "review": "yellow",
     "blocked_human": "red", "blocked_internal": "magenta", "failed": "red", "done": "gray",
 }
-# plan 台帳（done/working/delegated/pending/blocked）用
-PLAN_COLOR = {
-    "done": "green", "working": "yellow", "delegated": "cyan",
-    "pending": "gray", "blocked": "red", "failed": "red",
-    "running": "green", "queued": "cyan", "review": "yellow",
-}
 WORKER_COLOR = {
     "working": "green", "idle": "gray", "waiting_input": "yellow",
     "stalled": "red", "dead": "red", "starting": "cyan",
 }
-AGENT_COLOR = {
-    "working": "green", "idle": "gray", "blocked": "red",
-    "done": "gray", "unknown": "yellow",
-}
+# Herdr/OpenCode execution labels (runtime telemetry, NOT work state).
+EXEC_COLOR = {"busy": "green", "idle": "gray", "!idle": "red", "unavailable": "gray"}
 
 
 # --------------------------------------------------------------------------- #
@@ -190,29 +192,22 @@ def link(text, url, enabled):
     return f"{OSC8_PREFIX}{url}{OSC8_SUFFIX}{text}{OSC8_PREFIX}{OSC8_SUFFIX}"
 
 
-def group_panes(panes):
-    """Group panes as workspace -> tab -> panes, preserving encounter order.
-
-    Returns `[(workspace_id, [tab_id, ...], {tab_id: [pane, ...]}), ...]`.
-    """
-    order, wmap = [], {}
-    for p in panes:
-        w = p.get("workspace_id") or "?"
-        t = p.get("tab_id") or "?"
-        if w not in wmap:
-            wmap[w] = {"order": [], "tabs": {}}
-            order.append(w)
-        rec = wmap[w]
-        if t not in rec["tabs"]:
-            rec["tabs"][t] = []
-            rec["order"].append(t)
-        rec["tabs"][t].append(p)
-    return [(w, wmap[w]["order"], wmap[w]["tabs"]) for w in order]
-
-
 # --------------------------------------------------------------------------- #
-# sources: relay
+# relay (REQUIRED, read-only)
 # --------------------------------------------------------------------------- #
+class RelayNotFound(Exception):
+    def __init__(self, root):
+        self.root = root
+        super().__init__(root)
+
+    def message(self):
+        return (
+            "agent-status: Relay control plane not found\n"
+            f"expected: {Path(self.root) / '.relay' / 'state.db'}\n"
+            "run: relay init"
+        )
+
+
 def find_relay_db(root, cfg):
     cand = cfg["relay"].get("db") or os.environ.get("RELAY_DB")
     if cand:
@@ -229,6 +224,13 @@ def find_relay_db(root, cfg):
             break
         cur = cur.parent
     return None
+
+
+def relay_db_or_fail(root, cfg):
+    db = find_relay_db(root, cfg)
+    if not db:
+        raise RelayNotFound(root)
+    return db
 
 
 def _sqlite_rows(db, sql):
@@ -263,48 +265,36 @@ def read_relay(db):
     if not db:
         return None
     tasks = _sqlite_rows(
-        db, "SELECT id,title,state,priority,role,assignee,parent_task_id,plan_id,updated_at FROM tasks")
-    # Retired workers are history only (relay `worker retire`): their row survives
-    # so old events stay resolvable, but they must never render as a live worker
-    # (least of all as an "unplaced" one). Guard on the column so this keeps
-    # working against a relay that predates the retirement feature.
-    workers_sql = "SELECT id,role,state,current_task_id,generation,last_progress_at FROM workers"
+        db, "SELECT id,title,state,priority,role,assignee,parent_task_id,updated_at FROM tasks")
+    # Retired workers are history only (relay `worker retire`); hide them.
+    quiet_cols = ",quiet_until,quiet_reason" if _has_column(db, "workers", "quiet_until") else ""
+    workers_sql = (
+        "SELECT id,role,state,current_task_id,generation,last_progress_at" + quiet_cols + " FROM workers")
     if _has_column(db, "workers", "retired_at"):
         workers_sql += " WHERE retired_at IS NULL"
     workers = _sqlite_rows(db, workers_sql)
-    # Herdr placement per worker (used only for display grouping; absent on old DBs).
     runtimes = _sqlite_rows(
-        db, "SELECT worker_id,generation,created_at,workspace_id,tab_id,pane_id,runtime_id FROM worker_runtimes")
+        db, "SELECT worker_id,generation,state,relay_owned,workspace_id,tab_id,pane_id,"
+            "runtime_id,session_id,created_at FROM worker_runtimes")
+    unread = _sqlite_rows(
+        db, "SELECT recipient, COUNT(*) AS n FROM messages WHERE state IN ('queued','delivered') GROUP BY recipient")
+    # Latest block reason per task (display only; no mutation).
+    blocked = _sqlite_rows(
+        db, "SELECT task_id, body FROM task_notes WHERE kind IN ('blocked_human','blocked_internal') ORDER BY id")
     if tasks is None and workers is None:
         return None
-    return {"db": db, "tasks": tasks or [], "workers": workers or [], "runtimes": runtimes or []}
+    return {
+        "db": db,
+        "tasks": tasks or [],
+        "workers": workers or [],
+        "runtimes": runtimes or [],
+        "unread": {r["recipient"]: r["n"] for r in (unread or []) if r.get("recipient")},
+        "blocked": {r["task_id"]: r["body"] for r in (blocked or []) if r.get("task_id")},
+    }
 
 
 # --------------------------------------------------------------------------- #
-# sources: plan fallback
-# --------------------------------------------------------------------------- #
-def read_plan(root, cfg):
-    if not cfg["plan"].get("enabled", True):
-        return None, None
-    raw = cfg["plan"].get("path") or f"{STATE_DIRNAME}/plan.json"
-    p = Path(os.path.expanduser(raw))
-    if not p.is_absolute():
-        p = Path(root) / p
-    if not p.exists():
-        return None, None
-    try:
-        data = json.loads(p.read_text())
-    except Exception as exc:  # noqa: BLE001
-        print(f"agent-status: ignoring bad plan {p}: {exc}", file=sys.stderr)
-        return str(p), None
-    if isinstance(data, list):
-        data = {"tasks": data}
-    data.setdefault("tasks", [])
-    return str(p), data
-
-
-# --------------------------------------------------------------------------- #
-# sources: herdr
+# herdr (execution telemetry)
 # --------------------------------------------------------------------------- #
 def herdr_json(args):
     out = run(["herdr"] + args)
@@ -317,29 +307,20 @@ def herdr_json(args):
 
 
 def relay_worker_workspaces(root, cfg):
-    """relay の runtime が指している workspace（config に書き忘れた分を拾うため）。"""
-    if not cfg["relay"].get("enabled", True):
+    """Workspaces relay has actually placed a worker in (union with config)."""
+    db = find_relay_db(root, cfg)
+    if not db:
         return []
-    try:
-        db = find_relay_db(root, cfg)
-        if not db:
-            return []
-        rows = _sqlite_rows(
-            db, "SELECT DISTINCT workspace_id FROM worker_runtimes WHERE workspace_id IS NOT NULL")
-    except Exception:
+    rows = _sqlite_rows(db, "SELECT DISTINCT workspace_id FROM worker_runtimes WHERE workspace_id IS NOT NULL")
+    if not rows:
         return []
     return [r.get("workspace_id") for r in rows if r.get("workspace_id")]
 
 
 def read_agents(cfg, root, extra_ws):
+    """Live Herdr panes as execution telemetry. None when Herdr is unavailable."""
     if not cfg["herdr"].get("enabled", True) or os.environ.get("HERDR_ENV") != "1":
         return None
-    # Which workspaces to read:
-    #   --workspace wins outright (an explicit scope, never widened);
-    #   otherwise config.herdr.workspaces UNION every workspace relay has
-    #   actually placed a worker in. The union is what stops a stale config
-    #   entry from hiding workers that were moved to a new workspace — they
-    #   would otherwise show up as bogus "unplaced workers (no pane)".
     if extra_ws:
         ws = list(dict.fromkeys(extra_ws))
     else:
@@ -354,10 +335,6 @@ def read_agents(cfg, root, extra_ws):
         d = herdr_json(["pane", "list", "--workspace", w])
         if not d:
             continue
-        tab_labels = {}
-        td = herdr_json(["tab", "list", "--workspace", w])
-        for t in (td or {}).get("result", {}).get("tabs", []):
-            tab_labels[t.get("tab_id")] = t.get("label") or ""
         for p in d.get("result", {}).get("panes", []):
             panes.append({
                 "pane_id": p.get("pane_id", "?"),
@@ -367,24 +344,20 @@ def read_agents(cfg, root, extra_ws):
                 "cwd": p.get("cwd") or "",
                 "workspace_id": p.get("workspace_id") or w,
                 "tab_id": p.get("tab_id") or "",
-                "tab_label": tab_labels.get(p.get("tab_id"), "") or "",
                 "focused": bool(p.get("focused")),
             })
     if cfg["herdr"].get("cwd_match", True):
         panes = [p for p in panes if is_under(p["cwd"], root)]
-    # Never list the dashboard's own pane.
     tracked = _tracked_pane(root)
     if tracked:
         panes = [p for p in panes if p["pane_id"] != tracked]
-    # By default hide panes that are not running a recognized agent (shells,
-    # one-off commands). Set herdr.show_shells=true to include them.
-    if not cfg["herdr"].get("show_shells", False):
+    if not cfg["herdr"].get("show_unmanaged", False):
         panes = [p for p in panes if p["agent"] and p["agent"] != "-"]
     return panes
 
 
 # --------------------------------------------------------------------------- #
-# sources: git + extras
+# git + extras
 # --------------------------------------------------------------------------- #
 def read_git(root, cfg):
     head = run(["git", "log", "-1", "--format=%h %s"], cwd=root) or "?"
@@ -401,11 +374,7 @@ def read_git(root, cfg):
 
 
 def run_extra(cmd, cwd):
-    """Extras runner: never raises and always returns a display string.
-
-    On failure returns `!(reason)` instead of a silent `?`. A list is exec'd
-    directly; a string goes through the shell (pipes work).
-    """
+    """Extras runner: never raises and always returns a display string."""
     try:
         p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
                            timeout=20, shell=isinstance(cmd, str))
@@ -436,11 +405,10 @@ def read_extras(root, cfg):
 # collect
 # --------------------------------------------------------------------------- #
 def _tree_order(items, key=None):
-    """Order a flat task list as a forest by `parent` (parent task id).
+    """Order a flat task list as a forest by `parent_task_id`.
 
-    Returns `[(item, depth), ...]`. Items are dicts with `id` and optional
-    `parent`. Orphans and cycles fall back to depth 0 so nothing is ever dropped.
-    `key` sorts siblings; `None` keeps input order.
+    Returns `[(item, depth), ...]`. Orphans and cycles fall back to depth 0 so
+    nothing is ever dropped. `key` sorts siblings.
     """
     by_id = {str(it["id"]): it for it in items if it.get("id") is not None}
     children, roots = {}, []
@@ -480,162 +448,179 @@ def _tree_order(items, key=None):
     return out
 
 
-# relay の task state -> plan 台帳の語彙（intent と突き合わせる observed 側の言い換え）。
-RELAY_TO_PLAN = {
-    "queued": "pending", "running": "working", "review": "review", "done": "done",
-    "blocked_internal": "blocked", "blocked_human": "blocked", "failed": "failed",
-}
-# 1 項目に複数タスクが紐づくときの代表状態（先勝ち）。
-RELAY_STATE_PRIORITY = ["blocked_human", "blocked_internal", "failed", "running", "review", "queued", "done"]
-# 「進行中」とみなす宣言値（relay リンクが無いのにこの状態なら、表示は intent だけになる）。
-IN_FLIGHT_STATUSES = {"working", "review", "delegated", "blocked"}
-# 子から親へ畳むときの優先順（先勝ち）。
-ROLLUP_PRIORITY = ["blocked", "working", "review", "failed", "pending", "done"]
+def _task_sort_key(state_order):
+    def key(x):
+        return (state_order.get(x["state"], 99), -(x["priority"] or 0),
+                str(x.get("id") or ""))
+    return key
 
 
-def parts_by_plan(relay_tasks):
-    """relay task を plan_id で束ねる（リンクは relay 側のデータ）。"""
-    by_plan = {}
-    for t in (relay_tasks or []):
-        pid = t.get("plan_id")
-        if pid:
-            by_plan.setdefault(pid, []).append(t)
-    return by_plan
-
-
-def unknown_plan_links(plan_tasks, relay_tasks):
-    """plan.json に存在しない plan_id を指している task（doctor 用）。"""
-    ids = {it.get("id") for it in plan_tasks}
-    return [(t.get("id"), t.get("plan_id")) for t in (relay_tasks or [])
-            if t.get("plan_id") and t.get("plan_id") not in ids]
-
-
-def derive_plan_state(plan_tasks, relay_tasks, cfg):
-    """plan の intent は残したまま、relay の plan_id から observed を導出して親へ畳む。
-
-    item に足すキー:
-      declared  : plan.json に書かれた intent の status
-      relay_ids : 紐づいた relay task の id（表示・`--json` 用）
-      observed  : relay から見た状態（紐付けが無ければ None）
-      effective : 表示に使う状態（observed → 子の rollup → declared の順）
-      source    : effective の出どころ（"relay" / "rollup" / "intent"）
-      drift     : effective と declared が食い違っているか
-
-    リンクは `relay task add --plan <plan-id>` / `relay task link` が tasks.plan_id に
-    保存した値だけで決まる（タイトルは見ない）。
-    """
-    by_plan = parts_by_plan(relay_tasks)
-
-    children = {}
-    for it in plan_tasks:
-        children.setdefault(it.get("parent"), []).append(it)
-
-    for it in plan_tasks:
-        it["declared"] = it.get("status") or "pending"
-        linked = by_plan.get(it.get("id")) or []
-        it["relay_ids"] = [t.get("id") for t in linked]
-        states = [t.get("state") or "queued" for t in linked]
-        it["observed"] = RELAY_TO_PLAN.get(
-            next((s for s in RELAY_STATE_PRIORITY if s in states), states[0]), states[0]) if states else None
-
-    # 深い方から畳む（親が子の effective を参照できる順）。
-    for it in sorted(plan_tasks, key=lambda x: -(x.get("depth") or 0)):
-        if it.get("observed"):
-            it["effective"], it["source"] = it["observed"], "relay"
-        else:
-            kids = children.get(it.get("id")) or []
-            # rollup は relay 由来の子だけから畳む。観測が 1 つも無いなら
-            # intent をそのまま出す（plan.json だけの repo を揺らさない）。
-            states = [k.get("effective") or "pending" for k in kids if k.get("source") != "intent"]
-            if states:
-                it["effective"] = next((s for s in ROLLUP_PRIORITY if s in states), states[0])
-                it["source"] = "rollup"
-            else:
-                it["effective"], it["source"] = it["declared"], "intent"
-        it["drift"] = it["effective"] != it["declared"]
-    return plan_tasks
-
-
-def plan_view(plan, relay_tasks, cfg):
-    items = [dict(it) for it in (plan.get("tasks") or [])]
-    for it, depth in _tree_order(items):
-        it["depth"] = depth
-    return derive_plan_state(items, relay_tasks, cfg)
+UNFINISHED = ("running", "queued", "review", "blocked_human", "blocked_internal", "failed")
 
 
 def collect(root, cfg, workspaces):
-    relay = read_relay(find_relay_db(root, cfg))
-    plan_path, plan = read_plan(root, cfg)
+    db = relay_db_or_fail(root, cfg)  # Relay is mandatory: raises otherwise
+    relay = read_relay(db)
+    if relay is None:
+        raise RelayNotFound(root)
     agents = read_agents(cfg, root, workspaces)
+    pane_by_id = {p["pane_id"]: p for p in (agents or [])}
+    now_ms = time.time() * 1000
 
-    tasks = {"counts": {}, "total": 0, "done": 0, "remaining": [], "done_list": []}
-    if relay:
-        for t in relay["tasks"]:
-            st = t.get("state") or "queued"
-            tasks["counts"][st] = tasks["counts"].get(st, 0) + 1
-        tasks["total"] = len(relay["tasks"])
-        tasks["done"] = tasks["counts"].get("done", 0)
-        order = {s: i for i, s in enumerate(TASK_ORDER)}
-        items = [{
-            "id": t.get("id"), "state": t.get("state") or "queued",
-            "title": t.get("title") or "", "priority": t.get("priority"),
-            "role": t.get("role"), "assignee": t.get("assignee"),
-            "parent": t.get("parent_task_id"), "updated_at": t.get("updated_at"),
-        } for t in relay["tasks"]]
-        ranked = _tree_order(
-            items, key=lambda x: (order.get(x["state"], 99), -(x["priority"] or 0)))
-        for item, depth in ranked:
-            item["depth"] = depth
-            (tasks["done_list"] if item["state"] == "done" else tasks["remaining"]).append(item)
+    # ---- tasks: one flat list, ordered as a tree -----------------------------
+    state_order = {s: i for i, s in enumerate(TASK_ORDER)}
+    state_order["done"] = len(TASK_ORDER)  # done sorts after active siblings
+    items = []
+    for t in relay["tasks"]:
+        items.append({
+            "id": t.get("id"),
+            "title": t.get("title") or "",
+            "state": t.get("state") or "queued",
+            "priority": t.get("priority"),
+            "role": t.get("role"),
+            "assignee": t.get("assignee"),
+            "parent": t.get("parent_task_id"),
+            "updated_at": t.get("updated_at"),
+        })
+    ranked = _tree_order(items, key=_task_sort_key(state_order))
+    tree = []
+    counts = {}
+    done = 0
+    for item, depth in ranked:
+        item["depth"] = depth
+        if item["state"] == "done":
+            done += 1
+        counts[item["state"]] = counts.get(item["state"], 0) + 1
+        tree.append(item)
+
+    task_by_id = {str(it["id"]): it for it in tree if it.get("id") is not None}
+
+    # ---- workers: Relay row is primary, Herdr is an overlay ------------------
+    latest = {}
+    for r in relay.get("runtimes") or []:
+        wid = r.get("worker_id")
+        if not wid:
+            continue
+        k = (r.get("generation") or 0, r.get("created_at") or 0)
+        if wid not in latest or k > latest[wid][0]:
+            latest[wid] = (k, r)
 
     workers = []
-    if relay:
-        now_ms = time.time() * 1000
-        # Latest runtime row per worker (highest generation, then newest created_at).
-        latest = {}
-        for r in relay.get("runtimes") or []:
-            wid = r.get("worker_id")
-            if not wid:
-                continue
-            key = (r.get("generation") or 0, r.get("created_at") or 0)
-            if wid not in latest or key > latest[wid][0]:
-                latest[wid] = (key, r)
-        for w in relay["workers"]:
-            lp = w.get("last_progress_at") or 0
-            rt = latest.get(w.get("id"), (None, {}))[1]
-            workers.append({
-                "id": w.get("id"), "role": w.get("role"), "state": w.get("state"),
-                "task": w.get("current_task_id"), "generation": w.get("generation"),
-                "idle_ms": int(now_ms - lp) if lp else None,
-                "workspace": rt.get("workspace_id"), "tab": rt.get("tab_id"),
-                "pane": rt.get("pane_id"),
-            })
-        # Group order = workspace, then worker id (regex-free; "~" sorts absent last).
-        workers.sort(key=lambda x: (x.get("workspace") or "~", x["id"] or ""))
+    for w in relay["workers"]:
+        wid = w.get("id")
+        rt = latest.get(wid, (None, {}))[1]
+        pane = pane_by_id.get(rt.get("pane_id")) if rt.get("pane_id") else None
+        quiet_until = w.get("quiet_until")
+        quiet_active = bool(
+            quiet_until and quiet_until > now_ms and w.get("current_task_id")
+            and quiet_until is not None)
+        # relay quiet_task_id is not exposed here; the task pointer is the scope.
+        exec_label = _exec_label(cfg, w, pane, quiet_until, quiet_active, now_ms)
+        lp = w.get("last_progress_at") or 0
+        workers.append({
+            "id": wid,
+            "role": w.get("role"),
+            "state": w.get("state"),
+            "task": w.get("current_task_id"),
+            "generation": w.get("generation"),
+            "progress_ms": int(now_ms - lp) if lp else None,
+            "quiet_until": quiet_until,
+            "quiet_reason": w.get("quiet_reason"),
+            "quiet_active": quiet_active,
+            "exec": exec_label,
+            "pane": rt.get("pane_id"),
+            "runtime_id": rt.get("runtime_id"),
+            "workspace": rt.get("workspace_id"),
+            "tab": rt.get("tab_id"),
+            "runtime_state": rt.get("state"),
+            "agent_status": (pane or {}).get("agent_status"),
+            "unread": relay.get("unread", {}).get(wid, 0),
+        })
+    workers.sort(key=lambda x: (x.get("id") or ""))
 
-    plan_tasks = []
-    if plan:
-        plan_tasks = plan_view(plan, (relay or {}).get("tasks") or [], cfg)
+    # ---- attention (derived only) --------------------------------------------
+    roles = {w.get("role") for w in relay["workers"]}
+    attention = []
+    for w in workers:
+        if w["state"] in ("dead", "stalled"):
+            attention.append({"kind": "worker", "id": w["id"],
+                              "text": f"{w['state']} generation={w['generation']}"})
+        if w["state"] == "working" and w["exec"] == "!idle":
+            age = fmt_age(w.get("progress_ms"))
+            attention.append({"kind": "worker", "id": w["id"], "age": age,
+                              "text": f"{w['task'] or '-'} working but runtime idle, no quiet lease"})
+        if w["state"] == "starting" and (w.get("progress_ms") or 0) > 120_000:
+            attention.append({"kind": "worker", "id": w["id"],
+                              "text": f"starting for {fmt_age(w['progress_ms'])} (attach stuck?)"})
+        if w["unread"]:
+            attention.append({"kind": "worker", "id": w["id"], "text": f"unread messages={w['unread']}"})
+        if not w.get("pane"):
+            attention.append({"kind": "worker", "id": w["id"],
+                              "text": "supervised worker has no visible runtime pane"})
+    for it in tree:
+        if it["state"] in ("queued",) and it.get("role") and it["role"] not in roles:
+            attention.append({"kind": "task", "id": it["id"], "text": f"unclaimable role={it['role']}"})
+        elif it["state"] in ("blocked_human", "blocked_internal"):
+            reason = relay.get("blocked", {}).get(it["id"]) or ""
+            suffix = f": {reason}" if reason else ""
+            attention.append({"kind": "task", "id": it["id"],
+                              "text": f"{it['state']}{suffix}"})
+        elif it["state"] == "failed":
+            attention.append({"kind": "task", "id": it["id"], "text": "failed"})
+
+    # ---- runtimes (worker-centric) -------------------------------------------
+    runtimes = [{
+        "worker": w["id"], "generation": w["generation"], "pane": w.get("pane"),
+        "runtime_id": w.get("runtime_id"), "workspace": w.get("workspace"), "tab": w.get("tab"),
+        "state": w.get("runtime_state"), "agent": "opencode" if w.get("pane") else None,
+        "agent_status": w.get("agent_status"),
+    } for w in workers]
+    if cfg["herdr"].get("show_unmanaged", False) and agents:
+        mapped = {r["pane"] for r in runtimes if r.get("pane")}
+        for p in agents:
+            if p["pane_id"] in mapped:
+                continue
+            runtimes.append({
+                "worker": "-", "generation": None, "pane": p["pane_id"], "runtime_id": None,
+                "workspace": p.get("workspace_id"), "tab": p.get("tab_id"),
+                "state": None, "agent": p.get("agent"), "agent_status": p.get("agent_status"),
+                "unmanaged": True,
+            })
 
     title = cfg.get("title") or Path(root).name
     return {
         "root": root,
         "title": title,
         "subtitle": cfg.get("subtitle"),
-        "sources": {
-            "relay": (relay or {}).get("db"),
-            "plan": plan_path if plan else None,
-            "herdr": agents is not None,
-        },
+        "sources": {"relay": db, "herdr": agents is not None},
         "kpi": read_git(root, cfg),
         "extras": read_extras(root, cfg),
-        "tasks": tasks,
+        "summary": {
+            "total": len(tree), "done": done, "counts": counts,
+            "workers": len(workers), "working": sum(1 for w in workers if w["state"] == "working"),
+        },
+        "tasks": tree,
+        "task_tree": tree,
+        "counts": counts,
         "workers": workers,
-        "workers_by_pane": {w["pane"]: w for w in workers if w.get("pane")},
-        "plan": plan_tasks,
-        "plan_title": (plan or {}).get("title") if plan else None,
-        "agents": agents or [],
+        "attention": attention,
+        "runtimes": runtimes,
     }
+
+
+def _exec_label(cfg, w, pane, quiet_until, quiet_active, now_ms):
+    """Herdr execution label; never conflated with Relay worker state."""
+    if not cfg["herdr"].get("enabled", True) or os.environ.get("HERDR_ENV") != "1":
+        return "unavailable"
+    if pane and pane.get("agent_status") == "working":
+        return "busy"
+    if quiet_active:
+        return f"quiet {fmt_age(int(quiet_until - now_ms))}"
+    if w.get("state") == "working" and w.get("current_task_id") and pane is not None:
+        return "!idle"  # working + runtime idle + no quiet => unexpected idle
+    if pane is None:
+        return "unavailable"
+    return "idle"
 
 
 # --------------------------------------------------------------------------- #
@@ -653,15 +638,8 @@ def fmt_age(ms):
     return f"{m // 60}h"
 
 
-def progress_bar(done, total, width=22):
-    if total <= 0:
-        return "[" + "-" * width + "]"
-    filled = int(round(width * done / total))
-    return "[" + "#" * filled + "-" * (width - filled) + "]"
-
-
 def _dwidth(s):
-    """端末上の表示幅。East Asian Wide / Fullwidth は 2 桁として数える。"""
+    """Display width: East Asian Wide / Fullwidth count as 2."""
     w = 0
     for ch in s:
         if unicodedata.combining(ch):
@@ -671,7 +649,7 @@ def _dwidth(s):
 
 
 def _trim(s, w):
-    """表示幅 w に収まるよう切り詰める（溢れる分は … に置換）。ANSI を含まない文字列に使う。"""
+    """Trim to display width w (ellipsis on overflow). No ANSI in `s`."""
     s = s or ""
     if w <= 1:
         return ""
@@ -689,7 +667,7 @@ def _trim(s, w):
 
 
 def _wrap_join(tokens, width):
-    """トークン列を空白区切りで width 桁に詰める（1 行が長い場合の折り返し回避）。"""
+    """Pack whitespace-separated tokens into lines of at most `width`."""
     out, cur = [], ""
     for tok in tokens:
         cand = tok if not cur else cur + " " + tok
@@ -703,13 +681,7 @@ def _wrap_join(tokens, width):
     return out
 
 
-def _fit_tail(base, tail, width, reserve=6):
-    """tail を付けると本文が reserve 桁未満になるなら tail を落とす（折り返し防止）。"""
-    return tail if base + _dwidth(tail) + reserve <= width else ""
-
-
 def _term_width(default=120):
-    """描画先の桁数。pane 内 (watch) では resize にも追従する。"""
     try:
         return os.get_terminal_size(sys.stdout.fileno()).columns or default
     except Exception:
@@ -719,215 +691,211 @@ def _term_width(default=120):
             return default
 
 
+def _task_children(tree):
+    by_id = {str(it["id"]): it for it in tree if it.get("id") is not None}
+    children, roots = {}, []
+    for it in tree:
+        pid = it.get("parent")
+        own = str(it.get("id"))
+        if pid and str(pid) in by_id and str(pid) != own:
+            children.setdefault(str(pid), []).append(it)
+        else:
+            roots.append(it)
+    return children, roots
+
+
+def _all_done(tree):
+    """id -> True when the node and ALL its descendants are done."""
+    children, _ = _task_children(tree)
+    memo = {}
+
+    def calc(it):
+        iid = str(it["id"])
+        if iid in memo:
+            return memo[iid]
+        kids = children.get(iid, [])
+        res = (it["state"] == "done") and all(calc(k) for k in kids)
+        memo[iid] = res
+        return res
+
+    for it in tree:
+        calc(it)
+    return memo, children
+
+
+def _subtree_size(children, iid, seen=None):
+    if seen is None:
+        seen = set()
+    n = 0
+    for k in children.get(iid, []):
+        kid = str(k["id"])
+        if kid in seen:
+            continue
+        seen.add(kid)
+        n += 1 + _subtree_size(children, kid, seen)
+    return n
+
+
+def _render_work(lines, tree, width, c):
+    """Render the task tree: active branches first, done folded into context."""
+    if not tree:
+        lines.append(c("  (none)", "gray"))
+        return
+    all_done, children = _all_done(tree)
+    _, roots = _task_children(tree)
+
+    def emit_node(it, depth):
+        iid = str(it["id"])
+        kids = children.get(iid, [])
+        indent = "  " * depth
+        if kids and all_done.get(iid):
+            total = 1 + _subtree_size(children, iid)
+            suffix = f"  ({total}/{total} done)"
+            prefix = f"{indent}✓ {str(it['id']):<7} "
+            title = _trim(it["title"], max(4, width - _dwidth(prefix) - _dwidth(suffix)))
+            lines.append(c(f"{prefix}{title}{suffix}", "gray"))
+            return
+        st = it["state"]
+        tag_w = 8 if width < 44 else 15
+        if tag_w == 8:
+            st = st[:8]
+        display = f"{st:<{tag_w}}"
+        base = len(indent) + tag_w + 1 + 7 + 1
+        avail = width - base
+        owner = it.get("assignee") or it.get("role") or "-"
+        role = ""
+        if it.get("role") and it.get("assignee"):
+            role = f"  role={it['role']}"
+        if avail - 8 < _dwidth(role):
+            role = ""
+        tail = f"  [{owner}]" if owner else ""
+        if avail - _dwidth(role) - 8 < _dwidth(tail):
+            tail = ""
+        title_w = max(1, avail - _dwidth(role) - _dwidth(tail))
+        title = _trim(it["title"], title_w)
+        line = f"{indent}{c(display, TASK_COLOR.get(it['state']))} {str(it['id']):<7} {title}{role}{tail}"
+        lines.append(c(line, "dim") if it["state"] == "done" else line)
+        if kids:
+            emit_group(kids, depth + 1)
+
+    def emit_group(nodes, depth):
+        i = 0
+        while i < len(nodes):
+            n = nodes[i]
+            foldable = n["state"] == "done" and not children.get(str(n["id"]))
+            if foldable:
+                j = i
+                while j < len(nodes):
+                    m = nodes[j]
+                    if m["state"] == "done" and not children.get(str(m["id"])):
+                        j += 1
+                    else:
+                        break
+                run = nodes[i:j]
+                if len(run) >= 4:
+                    emit_node(run[0], depth)
+                    lines.append(c("  " * depth + f"✓ … +{len(run) - 1} done", "gray"))
+                else:
+                    for x in run:
+                        emit_node(x, depth)
+                i = j
+            else:
+                emit_node(n, depth)
+                i += 1
+
+    emit_group(roots, 0)
+
+
 def render_text(data, use_color, links=False, width=120):
     c = lambda t, name: color(t, name, use_color)  # noqa: E731
     lines = []
-    lines.append(c(_trim(data["title"], width), "bold"))
+    k = data["kpi"]
+    head_left = f"relay / {data['title']}"
+    head_right = f"{k['branch']} {k['head_sha']}"
+    pad = width - _dwidth(head_left) - _dwidth(head_right)
+    if pad >= 2:
+        lines.append(c(_trim(head_left, width), "bold") + " " * pad + c(head_right, "gray"))
+    else:
+        lines.append(c(_trim(head_left, width), "bold"))
+        lines.append(c(_trim(head_right, width), "gray"))
     if data.get("subtitle"):
         lines.append(c(_trim(data["subtitle"], width), "gray"))
-    k = data["kpi"]
-    lines.append(_trim(f"HEAD {k['head_sha']}  branch {k['branch']}  dirty {k['dirty']}", width))
-    extra_parts, extra_plain = [], []
+
+    s = data["summary"]
+    counts = data["counts"]
+    parts = [f"{s['total']} tasks", f"{s['done']} done"]
+    for st in TASK_ORDER:
+        if counts.get(st, 0):
+            parts.append(f"{counts[st]} {st}")
+    lines.append(_trim("   ".join(parts), width))
+
+    extra_parts = []
     for e in data.get("extras", []):
         v = str(e["value"])
         extra_parts.append(f"{e['label']} " + (color(v, "red", use_color) if v.startswith("!(") else v))
-        extra_plain.append(f"{e['label']} {v}")
-    extra = "  ".join(extra_parts)
-    if extra:
-        if _dwidth("  ".join(extra_plain)) <= width:
-            lines.append(extra)
-        else:
-            for chunk in _wrap_join(extra_plain, width):
-                lines.append(chunk)
+    if extra_parts:
+        lines.append(_wrap_join(extra_parts, width)[0] if _dwidth("  ".join(extra_parts)) > width
+                     else "  ".join(extra_parts))
 
-    t = data["tasks"]
-    if t["total"] or data.get("sources", {}).get("relay"):
-        counts = t["counts"]
-        workers = data["workers"]
-        working = sum(1 for w in workers if w["state"] == "working")
-        counts_list = ["running", "queued", "review", "blocked_human", "blocked_internal", "failed"]
-        counts_txt = " ".join(f"{s}={counts.get(s, 0)}" for s in counts_list)
-        fixed_w = (len(f"tasks {t['done']}/{t['total']} ") + 3
-                   + len(f"workers {working} working / {len(workers)}"))
-        bar_w = min(22, max(6, width - fixed_w - 2))
-        if fixed_w + 8 <= width:
-            bar = progress_bar(t["done"], t["total"], bar_w)
-            counts_head = (f"tasks {c(str(t['done']), 'green')}/{t['total']} {bar}   "
-                           f"workers {c(str(working), 'green')} working / {len(workers)}")
-            counts_head_w = fixed_w + len(bar)
-        else:
-            # バーを出す余白がない極端に狭い pane では数値だけに畳む。
-            bar = ""
-            counts_head = (f"tasks {c(str(t['done']), 'green')}/{t['total']}  "
-                           f"workers {c(str(working), 'green')}/{len(workers)}")
-            counts_head_w = len(f"tasks {t['done']}/{t['total']}  workers {working}/{len(workers)}")
+    # ---- WORK ---------------------------------------------------------------
+    lines.append("")
+    lines.append(c("WORK", "bold"))
+    _render_work(lines, data["tasks"], width, c)
+
+    # ---- WORKERS ------------------------------------------------------------
+    lines.append("")
+    lines.append(c("WORKERS", "bold"))
+    wk = data["workers"]
+    if not wk:
+        lines.append(c("  (none)", "gray"))
+    for w in wk:
+        state = color(f"{str(w['state']):<13}", WORKER_COLOR.get(w["state"]), use_color)
+        exec_plain = w["exec"]
+        exec_col = "green" if exec_plain == "busy" else ("red" if exec_plain == "!idle" else "cyan" if exec_plain.startswith("quiet") else "gray")
+        exec_txt = color(f"{exec_plain:<12}", exec_col, use_color)
+        task = str(w.get("task") or "-")
+        tail = f'progress {fmt_age(w.get("progress_ms"))}'
+        if w.get("quiet_active") and w.get("quiet_reason"):
+            tail = f'"{_trim(w["quiet_reason"], 40)}"'
+        lead = f"  {_trim(str(w['id']), 16):<16} {state} {exec_txt} {task:<5} "
+        if _dwidth(lead) + 4 <= width:
+            lines.append(lead + c(_trim(tail, max(1, width - _dwidth(lead))), "gray"))
+
+    # ---- ATTENTION ----------------------------------------------------------
+    lines.append("")
+    lines.append(c("ATTENTION", "bold"))
+    att = data["attention"]
+    if not att:
+        lines.append(c("  none", "gray"))
+    for a in att:
+        age = f"  {a['age']}" if a.get("age") else ""
+        lines.append(c(f"  ! {str(a['id']):<16} {a['text']}{age}", "red"))
+
+    # ---- RUNTIMES -----------------------------------------------------------
+    runtimes = data["runtimes"]
+    if runtimes and width >= 66:
         lines.append("")
-        if counts_head_w + 3 + len(counts_txt) <= width:
-            lines.append(counts_head + "   " + counts_txt)
-        else:
-            # 折り返すくらいなら 2 行以上に分ける（読み順を保つ）。
-            lines.append(counts_head)
-            for chunk in _wrap_join([f"{s}={counts.get(s, 0)}" for s in counts_list], width):
-                lines.append(c(chunk, "gray"))
-
-        lines.append("")
-        lines.append(c("REMAINING", "bold"))
-        if not t["remaining"]:
-            lines.append(c("  (none)", "gray"))
-        for it in t["remaining"]:
-            st = it["state"]
-            owner = it.get("assignee") or it.get("role") or "-"
-            indent = "  " * (it.get("depth") or 0)
-            # 狭い pane では owner → state の順に畳む（まず本文の余地を確保する）。
-            tag_w = 16
-            if width < 44:
-                tag_w, st, owner = 8, st[:8], None
-            tail = _fit_tail(2 + len(indent) + tag_w + 1 + 8 + 1,
-                             f"  [{owner}]" if owner else "", width)
-            tag = color(f"{st:<{tag_w}}", TASK_COLOR.get(it["state"]), use_color)
-            used = 2 + len(indent) + tag_w + 1 + 8 + 1 + _dwidth(tail)
-            lines.append(f"  {indent}{tag} {it.get('id') or '?':<8} "
-                         f"{_trim(it['title'], width - used)}{tail}")
-
-        lines.append("")
-        lines.append(c(f"DONE ({t['done']})", "bold"))
-        if not t["done_list"]:
-            lines.append(c("  (none)", "gray"))
-        for it in t["done_list"][:30]:
-            indent = "  " * (it.get("depth") or 0)
-            used = 2 + len(indent) + 8 + 1
-            lines.append(c(f"  {indent}{str(it.get('id') or '?'):<8} "
-                           f"{_trim(it['title'], width - used)}", "gray"))
-        if len(t["done_list"]) > 30:
-            lines.append(c(f"  ... +{len(t['done_list']) - 30} more", "gray"))
-
-    if data["plan"]:
-        lines.append("")
-        lines.append(c(_trim("PLAN (" + (data.get("plan_title") or "manual") + ")", width), "bold"))
-        for it in data["plan"]:
-            st = it.get("effective") or it.get("declared") or "pending"
-            tag = color(f"{st:<10}", PLAN_COLOR.get(st, "gray"), use_color)
-            indent = "  " * (it.get("depth") or 0)
-            tail = _fit_tail(2 + len(indent) + 10 + 1,
-                             f"  [{it.get('owner') or '-'}]" + (f"  - {it['note']}" if it.get("note") else ""),
-                             width)
-            fixed = 2 + len(indent) + 10 + 1 + _dwidth(tail)
-            # intent と observed が食い違う行だけ、末尾に宣言値を併記する。
-            mark = ""
-            if it.get("drift"):
-                ids = ",".join(it.get("relay_ids") or [])
-                candidate = f"  ←{it.get('declared')}" + (f" ({ids})" if ids else "")
-                # 併記のために本文が削られすぎるなら落とす（注記だけの行にしない）。
-                if fixed + _dwidth(candidate) + 6 <= width:
-                    mark = candidate
-            lines.append(f"  {indent}{tag} "
-                         f"{_trim(it.get('title') or '?', width - fixed - _dwidth(mark))}"
-                         f"{tail}{c(mark, 'yellow') if mark else ''}")
-
-    workers = data.get("workers") or []
-    by_pane = data.get("workers_by_pane") or {}
-
-    def worker_cells(w, width):
-        """relay 列: worker id / 現在タスク / 最終進捗。狭い pane では列を段階的に落とす。
-
-        戻り値は (表示文字列, 可視幅)。
-        """
-        full = 16 + 1 + 4 + 1 + 4
-        if width >= 86:
-            if not w:
-                return c(f"{'-':<16} {'-':<4} {'-':>4}", "gray"), full
-            return (f"{str(w.get('id') or '-')[:16]:<16} {str(w.get('task') or '-'):<4} "
-                    f"{fmt_age(w.get('idle_ms')):>4}"), full
-        if width >= 66:
-            if not w:
-                return c(f"{'-':<16}", "gray"), 16
-            return f"{str(w.get('id') or '-')[:16]:<16}", 16
-        return "", 0
-
-    def agent_line(base, a):
-        tag = color(f"{a['agent_status']:<8}", AGENT_COLOR.get(a["agent_status"]), use_color)
-        star = "*" if a.get("focused") else " "
-        plain = a["pane_id"] or "?"
-        pidw = 9 if width >= 36 else 7  # 極端に狭いときは pane 列のパディングを削る
-        vis = f"{ANSI['underline']}{plain}{ANSI['reset']}" if links else plain
-        pid = link(vis, f"{PANE_LINK_BASE}{plain}", links)
-        pad = " " * max(0, pidw - len(plain))
-        cells, cells_w = worker_cells(by_pane.get(plain), width)
-        used = len(base) + 1 + pidw + 1 + 8 + (1 + cells_w if cells_w else 0) + 2
-        head = f"{base}{star}{pid}{pad} {tag}" + (f" {cells}" if cells_w else "") + "  "
-        return head + _trim(a["title"], width - used)
-
-    def worker_lines(ws, ws_workers, indent):
-        ind_w = _dwidth(indent)
-        # 固定部: indent + state(14) + ' ' + ' task='(6)
-        lead = ind_w + 14 + 1 + 6
-        for w in ws_workers:
-            tag = color(f"{w['state']:<14}", WORKER_COLOR.get(w["state"]), use_color)
-            tail = f"gen={w.get('generation')}  last-progress {fmt_age(w.get('idle_ms'))}"
-            tail_w = _dwidth(tail)
-            # 右端の tail は、id(最低4) + task(最低1) の余地が残るときだけ付ける。
-            tail_part = 2 + tail_w
-            keep_tail = lead + tail_part + 4 + 1 <= width
-            avail = width - lead - (tail_part if keep_tail else 0)
-            id_w = max(4, min(16, avail - 1))
-            id_s = _trim(str(w["id"]), id_w)
-            task_s = _trim(w.get("task") or "-", max(1, avail - _dwidth(id_s)))
-            line = f"{indent}{tag} {id_s} task={task_s}"
-            if keep_tail:
-                line += "  " + tail
+        lines.append(c("RUNTIMES", "bold"))
+        for r in runtimes:
+            pane = r.get("pane")
+            if pane:
+                vis = f"{ANSI['underline']}{pane}{ANSI['reset']}" if links else pane
+                pane_s = link(vis, f"{PANE_LINK_BASE}{pane}", links)
+            else:
+                pane_s = c("no-pane", "yellow")
+            gen = f"g{r.get('generation')}"
+            status = r.get("agent_status") or ("-" if not pane else "?")
+            line = (f"  {_trim(str(r['worker']), 16):<16} {gen:<4} {pane_s:<9} "
+                    f"{status}")
             lines.append(line)
-
-    if data["agents"]:
-        lines.append("")
-        lines.append(c("AGENTS", "bold"))
-        groups = group_panes(data["agents"])
-        multi_ws = len(groups) > 1
-        for w, tab_order, tabs in groups:
-            if multi_ws:
-                lines.append(" " + c(w, "blue"))
-            for t in tab_order:
-                panes = tabs[t]
-                tab_label = panes[0].get("tab_label") or ""
-                if len(panes) == 1:
-                    # 1 pane しかない tab は見出しもラベルも出さず、pane 行だけを 1 行で出す。
-                    base = " " + ("  " if multi_ws else "")
-                    lines.append(agent_line(base, panes[0]))
-                else:
-                    head = t + (f"  {tab_label}" if tab_label else "")
-                    head = _trim(head, width - 1 - (2 if multi_ws else 0))
-                    lines.append(" " + ("  " if multi_ws else "") + c(head, "blue"))
-                    base = " " + "  " * ((1 if multi_ws else 0) + 1)
-                    for a in panes:
-                        lines.append(agent_line(base, a))
-
-        # pane を持たない worker（未 spawn / cleanup 済み / cwd 不一致で pane が隠れている等）。
-        placed = {by_pane[a["pane_id"]].get("id") for a in data["agents"] if a.get("pane_id") in by_pane}
-        unplaced = [w for w in workers if w.get("id") not in placed]
-        if unplaced:
-            lines.append("")
-            lines.append(c("  UNPLACED WORKERS (no pane)", "bold"))
-            worker_lines(None, unplaced, "  ")
         if links:
             lines.append(color("  Ctrl+click a pane id → focus that pane", "dim", use_color))
-    elif workers:
-        # Herdr 未使用時は relay だけで描く（worker の居場所でまとめる）。
-        lines.append("")
-        lines.append(c("RELAY WORKERS", "bold"))
-        groups = {}
-        for w in workers:
-            groups.setdefault(w.get("workspace"), []).append(w)
-        multi_ws = len(groups) > 1
-        for ws, ws_workers in groups.items():
-            if multi_ws:
-                lines.append(" " + c(ws or "-", "blue"))
-            worker_lines(ws, ws_workers, "    " if multi_ws else "  ")
 
+    # ---- sources footer -----------------------------------------------------
     lines.append("")
-    src = []
-    src.append("relay:" + (Path(data["sources"]["relay"]).parent.parent.name
-                           if data["sources"].get("relay") else "none"))
-    src.append("herdr:" + ("on" if data["sources"].get("herdr") else "off"))
-    src.append("plan:" + ("yes" if data["sources"].get("plan") else "no"))
+    src = ["relay:" + (Path(data["sources"]["relay"]).parent.parent.name
+                       if data["sources"].get("relay") else "none"),
+           "herdr:" + ("on" if data["sources"].get("herdr") else "off")]
     src_line = "sources " + "  ".join(src)
     if _dwidth(src_line) <= width:
         lines.append(c(src_line, "gray"))
@@ -938,13 +906,36 @@ def render_text(data, use_color, links=False, width=120):
 
 
 def render_json(data):
-    return json.dumps(data, ensure_ascii=False, indent=2)
+    return json.dumps({
+        "summary": data["summary"],
+        "git": data["kpi"],
+        "extras": data.get("extras", []),
+        "tasks": data["task_tree"],
+        "task_tree": data["task_tree"],
+        "workers": data["workers"],
+        "attention": data["attention"],
+        "runtimes": data["runtimes"],
+        "sources": data["sources"],
+    }, ensure_ascii=False, indent=2)
 
 
 # --------------------------------------------------------------------------- #
 # commands
 # --------------------------------------------------------------------------- #
+def _relay_error(root, cfg):
+    """Return the RelayNotFound message for stderr, or None when Relay exists."""
+    try:
+        relay_db_or_fail(root, cfg)
+        return None
+    except RelayNotFound as exc:
+        return exc.message()
+
+
 def cmd_render(args, root, cfg):
+    err = _relay_error(root, cfg)
+    if err:
+        print(err, file=sys.stderr)
+        return 2
     data = collect(root, cfg, args.workspaces)
     if args.json:
         print(render_json(data))
@@ -952,6 +943,7 @@ def cmd_render(args, root, cfg):
         use_color = sys.stdout.isatty() or os.environ.get("FORCE_COLOR") == "1"
         links = use_color and bool(cfg["herdr"].get("links", True))
         print(render_text(data, use_color, links, _term_width()))
+    return 0
 
 
 def cmd_watch(args, root, cfg):
@@ -960,17 +952,22 @@ def cmd_watch(args, root, cfg):
     try:
         while True:
             cur = _config_stamp(root, explicit)
-            if cur != stamp:  # config.json edited/appeared/removed -> reload
+            if cur != stamp:
                 cfg, _ = load_config(root, explicit)
                 stamp = cur
             interval = args.interval or cfg.get("watch_interval") or WATCH_DEFAULT
-            data = collect(root, cfg, args.workspaces)
+            err = _relay_error(root, cfg)
             sys.stdout.write("\033[2J\033[H")
-            print(render_text(data, True, bool(cfg["herdr"].get("links", True)), _term_width()))
+            if err:
+                print(err, file=sys.stderr)
+            else:
+                data = collect(root, cfg, args.workspaces)
+                print(render_text(data, True, bool(cfg["herdr"].get("links", True)), _term_width()))
             sys.stdout.flush()
             time.sleep(interval)
     except KeyboardInterrupt:
         pass
+    return 0
 
 
 def _status_pane_file(root):
@@ -994,7 +991,6 @@ def cmd_show(args, root, cfg):
             pane = old
     if pane is None:
         if getattr(args, "as_tab", False):
-            # 独立タブ: 他の pane を分割せず、専用タブの root pane で動かす。
             ws = (getattr(args, "tab_workspace", None) or os.environ.get("HERDR_WORKSPACE_ID")
                   or (target or "").split(":")[0] or None)
             argv = ["tab", "create"]
@@ -1049,41 +1045,28 @@ def cmd_hide(args, root):
 
 def cmd_doctor(args, root, cfg, cfg_path):
     db = find_relay_db(root, cfg)
-    plan_path, plan = read_plan(root, cfg)
-    relay = read_relay(db) if db else None
     lines = [
-        f"repo            {root}",
-        f"config          {cfg_path or '(defaults)'}",
-        f"HERDR_ENV       {os.environ.get('HERDR_ENV', '(unset)')}",
-        f"HERDR_WORKSPACE {os.environ.get('HERDR_WORKSPACE_ID', '(unset)')}",
-        f"relay db        {db or '(not found)'}",
+        f"repo          {root}",
+        f"config        {cfg_path or '(defaults)'}",
+        f"HERDR_ENV     {os.environ.get('HERDR_ENV', '(unset)')}",
+        f"relay db      {'OK ' + db if db else '(not found - run: relay init)'}",
     ]
+    if not db:
+        print("\n".join(lines))
+        return 2
+    relay = read_relay(db)
     if relay:
-        lines.append(f"  tasks         {len(relay['tasks'])} rows")
-        lines.append(f"  workers       {len(relay['workers'])} rows")
-    lines.append(f"plan            {plan_path or '(not found)'}"
-                 + (f"  tasks={len(plan.get('tasks', []))}" if plan else ""))
-    if plan:
-        derived = plan_view(plan, (relay or {}).get("tasks") or [], cfg)
-        linked = sum(1 for it in derived if it.get("relay_ids"))
-        drift = [it.get("id") for it in derived if it.get("drift")]
-        unknown = unknown_plan_links(derived, (relay or {}).get("tasks") or [])
-        lines.append(f"  links         {linked}/{len(derived)} items <- relay tasks"
-                     + (f"  drift={','.join(str(d) for d in drift)}" if drift else "  drift=none"))
-        # 進行中と宣言しているのに relay と繋がっていない項目 = 状態が intent のままで古びる行。
-        # （rollup で観測が伝播している親は「紐付き無し」ではないので除く。）
-        unlinked = [it.get("id") for it in derived
-                    if it.get("source") == "intent" and not it.get("relay_ids")
-                    and it.get("declared") in IN_FLIGHT_STATUSES]
-        if unlinked:
-            lines.append("  unlinked      " + ",".join(str(i) for i in unlinked)
-                         + "  (in-flight but no relay task; shown from intent only)")
-        if unknown:
-            lines.append("  unknown links "
-                         + ", ".join(f"{tid}->{pid}" for tid, pid in unknown)
-                         + "  (no such plan item)")
+        lines.append(f"tasks         {len(relay['tasks'])}")
+        lines.append(f"workers       {len(relay['workers'])}")
+        lines.append(f"runtimes      {len(relay['runtimes'])}")
+        placed = {r.get("worker_id") for r in relay["runtimes"] if r.get("pane_id")}
+        ids = [w.get("id") for w in relay["workers"]]
+        linked = sum(1 for i in ids if i in placed)
+        lines.append(f"runtime links {linked}/{len(ids)}")
+    sock = Path(db).parent / "relay.sock"
+    lines.append(f"daemon/socket {'OK ' + str(sock) if sock.exists() else '(no socket)'}")
     agents = read_agents(cfg, root, args.workspaces)
-    lines.append(f"herdr panes     {len(agents) if agents is not None else 'off'}")
+    lines.append(f"herdr         {'OK (' + str(len(agents)) + ' panes)' if agents is not None else 'off'}")
     print("\n".join(lines))
     return 0
 
@@ -1092,7 +1075,7 @@ def cmd_doctor(args, root, cfg, cfg_path):
 # entrypoint
 # --------------------------------------------------------------------------- #
 def build_parser():
-    ap = argparse.ArgumentParser(prog="status", description="live progress dashboard (relay + Herdr)")
+    ap = argparse.ArgumentParser(prog="status", description="read-only Relay dashboard (+ Herdr telemetry)")
     sub = ap.add_subparsers(dest="cmd")
 
     def common(p):
@@ -1137,9 +1120,9 @@ def main(argv=None):
     cfg, cfg_path = load_config(root, getattr(args, "config", None))
 
     if args.cmd == "render":
-        cmd_render(args, root, cfg)
+        return cmd_render(args, root, cfg)
     elif args.cmd == "watch":
-        cmd_watch(args, root, cfg)
+        return cmd_watch(args, root, cfg)
     elif args.cmd == "show":
         return cmd_show(args, root, cfg)
     elif args.cmd == "hide":
