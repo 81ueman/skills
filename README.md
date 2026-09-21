@@ -10,7 +10,7 @@
 
 ```
 skills/
-  agent-status/         Herdr上の複数エージェントの進捗をライブ表示するスキル
+  agent-status/         `relay dashboard` を pane の隣に出す薄いラッパースキル
   d2-diagrams/          D2（Terrastruct D2）で図を描くスキル
   diagram-tool-choice/  d2 と Mermaid のどちらを使うか判断する入口スキル
   mermaid-diagrams/     Mermaid で図を描くスキル
@@ -20,7 +20,7 @@ skills/
 
 | スキル | 説明 |
 | --- | --- |
-| `agent-status` | relay（SQLite が正本）と Herdr から残り/完了タスクを集約し、pane の隣にライブ表示する |
+| `agent-status` | relay 本体の `relay dashboard` を pane の隣に出す薄いラッパー（実体は relay、fallback なし） |
 | `diagram-tool-choice` | 図を描く前に d2 / Mermaid を判断軸の表で選び、対応するスキルへ誘導する |
 | `d2-diagrams` | d2 の CLI、レイアウトエンジン（dagre/elk/tala）、記法、テンプレート |
 | `mermaid-diagrams` | Mermaid の CLI（mmdc / mermaid-ascii）、記法、テンプレート |
