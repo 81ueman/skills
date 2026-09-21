@@ -28,7 +28,7 @@ CREATE TABLE workers (id TEXT PRIMARY KEY, role TEXT, state TEXT, current_task_i
   generation INTEGER, last_progress_at INTEGER, quiet_until INTEGER, quiet_reason TEXT, retired_at INTEGER);
 CREATE TABLE worker_runtimes (id INTEGER PRIMARY KEY AUTOINCREMENT, worker_id TEXT, generation INTEGER,
   state TEXT, relay_owned INTEGER, workspace_id TEXT, tab_id TEXT, pane_id TEXT,
-  runtime_id TEXT, session_id TEXT, created_at INTEGER);
+  runtime_id TEXT, session_id TEXT, created_at INTEGER, cleanup_after INTEGER);
 CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, recipient TEXT, state TEXT);
 CREATE TABLE task_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, worker_id TEXT,
   kind TEXT, body TEXT, created_at INTEGER);
@@ -232,6 +232,89 @@ class Attention(Base):
         self.assertTrue(any("no visible runtime pane" in a["text"] for a in data["attention"]))
 
 
+class WorkersMerged(Base):
+    """One durable Relay worker = one main row; its current runtime is columns."""
+
+    def _row(self, out, wid):
+        for line in out.splitlines():
+            if line.strip().startswith(wid):
+                return line
+        return None
+
+    def test_one_row_per_worker_and_no_runtimes_section(self):
+        self.add_worker("control-go", state="idle", generation=1)
+        self.add_runtime("control-go", generation=1, pane="w6E:p3")
+        out, data = self.render()
+        self.assertEqual(len(data["workers"]), 1)
+        self.assertNotIn("RUNTIMES", out)  # merged into WORKERS
+        self.assertEqual(len([l for l in out.splitlines() if "control-go" in l]), 1)
+
+    def test_current_generation_and_pane_on_worker_row(self):
+        self.add_worker("control-go", state="idle", generation=2)
+        self.add_runtime("control-go", generation=2, pane="w6E:p3")
+        out, data = self.render(width=100)
+        row = self._row(out, "control-go")
+        self.assertIn("g2", row)
+        self.assertIn("w6E:p3", row)
+        self.assertEqual(data["workers"][0]["runtime"]["generation"], 2)
+        self.assertEqual(data["workers"][0]["execution"]["pane_id"], "w6E:p3")
+
+    def test_old_runtime_does_not_duplicate_the_worker_row(self):
+        self.add_worker("control-go", state="working", task="T12", generation=3)
+        self.add_runtime("control-go", generation=2, pane="w6E:p3", state="stale")
+        self.add_runtime("control-go", generation=3, pane="w6E:p9", state="active")
+        self.add_task("T12", "x", state="running", assignee="control-go")
+        out, data = self.render(width=100)
+        section = out.split("WORKERS", 1)[1].split("ATTENTION", 1)[0]
+        rows = [l for l in section.splitlines() if "control-go" in l]
+        self.assertEqual(len(rows), 1)  # one durable worker, one row
+        self.assertIn("g3", rows[0])
+        self.assertEqual(data["workers"][0]["old_runtimes"][0]["generation"], 2)
+
+    def test_overdue_relay_owned_runtime_appears_in_attention(self):
+        self.add_worker("w", state="idle", generation=3)
+        self.add_runtime("w", generation=3, pane="w:p3", state="active")
+        self.add_runtime("w", generation=2, pane="w:p2", state="stale")
+        self.sql("UPDATE worker_runtimes SET relay_owned=1, cleanup_after=? WHERE generation=2", [(1,)])
+        _, data = self.render()
+        self.assertTrue(any("cleanup overdue" in a["text"] for a in data["attention"]))
+
+    def test_starting_and_dead_without_runtime_stay_visible(self):
+        self.add_worker("starting-w", state="starting", generation=4)
+        self.add_worker("dead-w", state="dead", generation=4, task="T9")
+        out, data = self.render()
+        ids = [w["id"] for w in data["workers"]]
+        self.assertIn("starting-w", ids)
+        self.assertIn("dead-w", ids)
+        self.assertIn("starting-w", out)
+        self.assertTrue(any("no visible runtime pane" in a["text"] for a in data["attention"]))
+        self.assertTrue(any(a["id"] == "dead-w" and "dead" in a["text"] for a in data["attention"]))
+
+    def test_narrow_drops_generation_before_core_columns(self):
+        self.add_worker("control-go", state="working", task="T12", generation=3)
+        self.add_runtime("control-go", generation=3, pane="w6E:p3")
+        self.add_task("T12", "x", state="running", assignee="control-go")
+        row = self._row(self.render(width=50)[0], "control-go")
+        self.assertIn("working", row)
+        self.assertIn("T12", row)
+        self.assertNotIn("g3", row)      # generation dropped first
+        self.assertNotIn("w6E:p3", row)  # pane dropped too
+        row_wide = self._row(self.render(width=100)[0], "control-go")
+        self.assertIn("g3", row_wide)
+        self.assertIn("w6E:p3", row_wide)
+
+    def test_json_keeps_worker_and_runtime_separate(self):
+        self.add_worker("w", state="working", task="T1", generation=2)
+        self.add_runtime("w", generation=2, pane="w:p1")
+        data = status.collect(str(self.dir), _cfg(), [])
+        payload = json.loads(status.render_json(data))
+        w = payload["workers"][0]
+        self.assertEqual(w["id"], "w")
+        self.assertEqual(w["runtime"]["generation"], 2)
+        self.assertEqual(w["execution"]["pane_id"], "w:p1")
+        self.assertIn("runtimes", payload)  # internal split preserved in JSON
+
+
 class Visibility(Base):
     def test_13_retired_workers_hidden(self):
         self.add_worker("live")
@@ -240,15 +323,14 @@ class Visibility(Base):
         self.assertIn("live", out)
         self.assertNotIn("gone", out)
 
-    def test_15_unmanaged_panes_hidden_by_default(self):
+    def test_15_unmanaged_panes_never_create_a_worker_row(self):
         self.add_worker("w")
         self.put_herdr_env()
         self._panes = [{"pane_id": "w9:pX", "agent": "opencode", "agent_status": "idle",
                         "cwd": str(self.dir), "workspace_id": "w9"}]
-        out, _ = self.render()
+        out, data = self.render()
         self.assertNotIn("w9:pX", out)
-        out2, _ = self.render(cfg=_cfg({"herdr": {"show_unmanaged": True}}))
-        self.assertIn("w9:pX", out2)
+        self.assertEqual([w["id"] for w in data["workers"]], ["w"])  # Relay workers only
 
     def test_16_pane_osc8_link(self):
         self.add_worker("w")

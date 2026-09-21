@@ -12,8 +12,7 @@
     "enabled": true,
     "workspaces": [],
     "cwd_match": true,
-    "links": true,
-    "show_unmanaged": false
+    "links": true
   },
   "kpi": { "exclude": ["README.md", "catalog.json", "notes/", "papers/", "summaries/", ".agent-status/"] },
   "extras": [],
@@ -30,7 +29,6 @@
 | `herdr.workspaces` | `[]` | 読む workspace。**relay が worker を置いている workspace は自動で足される**ので、pane を移しても設定漏れで欠けない。`--workspace` を渡すとその範囲だけ |
 | `herdr.cwd_match` | `true` | `<repo>` 配下の cwd の pane だけに絞る |
 | `herdr.links` | `true` | pane id を OSC8 リンク化（TTY のときだけ）。Ctrl+click でその pane へ |
-| `herdr.show_unmanaged` | `false` | debug。Relay 管理外の Herdr/OpenCode pane も表示する（既定は Relay worker/runtime のみ） |
 | `kpi.exclude` | 上記 | dirty 件数から除外するパスの部分文字列 |
 | `extras` | `[]` | 追加 KPI。`command` の stdout を 1 行で表示。**配列は exec、文字列は shell 経由**（パイプ可）。配列推奨。失敗時は `!(理由)` を赤字表示 |
 | `watch_interval` | `5` | `watch` / `show` の更新秒数 |

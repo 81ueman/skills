@@ -6,8 +6,7 @@
     "enabled": true,
     "workspaces": [],
     "cwd_match": true,
-    "links": true,
-    "show_unmanaged": false
+    "links": true
   },
   "kpi": { "exclude": ["README.md", "catalog.json", "notes/", "papers/", "summaries/", ".agent-status/"] },
   "extras": [],

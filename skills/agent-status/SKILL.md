@@ -27,6 +27,11 @@ Herdr is execution telemetry, not work state.
 agent-status only observes and renders.
 ```
 
+**Worker は durable、Runtime は disposable。** WORKERS の 1 行は 1 つの durable な Relay worker を表します。
+generation / pane / live execution の列は、その worker の **current runtime だけ**を説明します（Worker と
+Runtime は内部モデルでは別物：generation fencing・restart・stale cleanup・relay_owned 保護・session binding のため）。
+古い runtime 世代は通常ダッシュボードには出しません（必要時のみ `--runtime-history` か ATTENTION）。
+
 **Relay は必須**。`.relay/state.db` が無ければ明確に失敗する（`relay init` を促す）。計画台帳の
 fallback は持たない — 仕事の構造は Relay の task tree だけで表現する。本スキルは表示専用で、
 タスクの追加・claim・submit・wake・message 送信などは一切行わない（それは `relay` CLI の仕事）。
@@ -88,22 +93,27 @@ DB は **`mode=ro`（read-only）** でしか開かない。
   - 全子孫が done の subtree は 1 行に畳む（`✓ T12 … (5/5 done)`）。同階層の done が続く場合も
     `✓ … +94 done` のように畳む（active branch を優先）。
   - 行は `state / id / title / role / [assignee]`。狭い pane では role→owner の順に落とす。
-- `WORKERS` … **Relay worker が主体**。`worker / Relay state / Herdr 実行状態 / current task / progress`。
+- `WORKERS` … **Relay worker が主体。1 worker = 1 row**。
+  `worker / Relay state / execution state / current task / generation / pane / progress`。
+  - Worker は durable、Runtime は disposable。generation / pane / execution の列は**その worker の
+    current runtime だけ**を表す。古い世代は通常表示しない（`--runtime-history` か ATTENTION で確認）。
   - **Relay worker state**（`starting idle working waiting_input stalled dead`）と
-    **Herdr 実行状態**（`busy idle !idle unavailable`、`quiet <残り>`）は**別の列**。混ぜない。
+    **execution state**（`starting busy idle !idle unavailable`、`quiet <残り>`）は**別の列**。混ぜない。
   - `!idle` は「Relay は working＋タスク保持なのに Herdr が idle、quiet リーズも無い」= unexpected idle。
   - `quiet <残り>` は Relay の bounded quiet lease（`relay wait`）中の意図的 idle。正常表示。
+  - pane id を **Ctrl+click** するとその pane にフォーカス（要プラグイン link、`herdr.links=false` で無効）。
+    戻るときは Herdr の `keys.last_pane`（例 `prefix+semicolon`）。
 - `ATTENTION` … derived な警告のみ（DB には書かない）。無ければ `none`。例:
   `! dp-2  T9 working but runtime idle, no quiet lease  2m14s` /
   `! T14 unclaimable role=rust-perf` / `! reviewer-2 dead generation=4` /
   `! T19 blocked_human: <reason>` / `! worker-3 unread messages=2` /
-  `! worker-x supervised worker has no visible runtime pane`。
-- `RUNTIMES` … worker 主体の一覧: `worker / g<世代> / pane / Herdr agent_status`。
-  pane id を **Ctrl+click** するとその pane にフォーカス（要プラグイン link、`herdr.links=false` で無効）。
-  戻るときは Herdr の `keys.last_pane`（例 `prefix+semicolon`）。
+  `! worker-x supervised worker has no visible runtime pane` /
+  `! worker-x old runtime g2 stale, cleanup overdue`（relay-owned のみ）。
+- `--runtime-history` … 各 worker の全 runtime 世代を `RUNTIME HISTORY` として表示（既定は current のみ）。
 - `sources` … `relay:<name>` と `herdr:on|off`。
-- **幅の扱い**: pane 幅に合わせて全行を 1 行に収める（**全角は 2 桁**）。狭いときは role→priority→
-  progress→generation→workspace の順に落とし、`RUNTIMES` 自体を省略する。resize に追従する。
+- **幅の扱い**: pane 幅に合わせて全行を 1 行に収める（**全角は 2 桁**）。WORKERS は狭いとき
+  progress→generation→pane の順に落とし、**worker / Relay state / execution state / task は必ず残す**。
+  resize に追従する。
 
 ## 判断基準
 

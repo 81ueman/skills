@@ -21,14 +21,19 @@
 
 - **task tree**: `tasks.parent_task_id` で親子に並べる。work decomposition であり worker の上下関係ではない。
   active → priority 降順 → id 固定。全子孫が done の subtree は 1 行に畳む。
+- **worker-centric join**: `WORKERS` は relay worker 一覧が骨格。**1 worker = 1 row**。current runtime は
+  `worker.generation` に一致する `worker_runtimes` 行（無ければ pane なし。古い世代で代用しない）。
+  generation / pane / exec はその current runtime のもの。古い世代は `--runtime-history` でのみ列挙する。
 - **exec label**（Herdr 実行状態。Relay state とは別列）:
+  - Relay state が `starting` → `starting`
   - Herdr が `working` → `busy`
   - Relay の `quiet_until > now` → `quiet <残り>`（意図的な bounded idle）
   - Relay state が `working`＋タスク保持＋Herdr idle → `!idle`（unexpected idle）
-  - それ以外 → `idle` / `unavailable`（Herdr off）
+  - pane なし / Herdr off → `unavailable`
+  - それ以外 → `idle`
 - **ATTENTION**（derived のみ）: unexpected idle / `stalled` / `dead` / starting 長期化 /
   unclaimable（role を担う worker が居ない queued）/ `blocked_*` / `failed` / 未読メッセージ /
-  runtime pane を持たない worker。
+  runtime pane を持たない worker / relay-owned の古い runtime で cleanup overdue（`cleanup_after <= now`）。
 - **task progress**: `done/total` 件数と state 内訳。git は progress の正本にしない。
 
 ## 2. Herdr（実行テレメトリ）
@@ -36,9 +41,9 @@
 - `HERDR_ENV=1` のときだけ有効。`herdr pane list --workspace <ws>` を対象 ws ごとに実行。
 - 対象 ws は `herdr.workspaces` ∪ relay の `worker_runtimes.workspace_id`（自動追従）。
 - `herdr.cwd_match` で `<repo>` 配下に絞る。ダッシュボード自身の pane は常に除外。
-- 既定では Relay 管理外の pane（シェル等）は表示しない（`herdr.show_unmanaged` で表示）。
+- Relay 管理外の pane（シェル等）は**表示しない**。WORKERS は Relay worker のみを骨格にし、unmanaged pane は worker row を作らない。
 - 各 pane から `agent_status`（`working` / `idle` / `done` / `blocked` / `unknown`）を実行状態として読む。
-  **これは work state ではなく実行テレメトリ**。worker は `worker_runtimes.pane_id` で対応付ける。
+  **これは work state ではなく実行テレメトリ**。worker は current runtime（`worker.generation` 一致）の `pane_id` で対応付ける。
 - pane id は OSC8 リンク（`herdr.links`）。Ctrl+click は Herdr プラグイン（`herdr-plugin/`）が
   socket `pane.focus` に回す。
 
@@ -51,11 +56,12 @@
 
 ```
 repo / config / HERDR_ENV
-relay db      OK <path> | (not found - run: relay init)
-tasks / workers / runtimes
-runtime links <pane を持つ worker>/<worker 数>
-daemon/socket OK <sock> | (no socket)
-herdr         OK (<n> panes) | off
+relay db         OK <path> | (not found - run: relay init)
+tasks / workers / current runtimes
+runtime links    <pane を持つ current runtime の worker>/<worker 数>
+stale runtimes   <stale/dead の数>
+daemon/socket    OK <sock> | (no socket)
+herdr            OK (<n> panes) | off
 ```
 
 `plan` / `drift` / `unlinked` / `unknown plan ids` は**廃止**。

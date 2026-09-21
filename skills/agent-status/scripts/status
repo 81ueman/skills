@@ -43,8 +43,6 @@ DEFAULT_CONFIG = {
         "workspaces": [],
         "cwd_match": True,
         "links": True,
-        # Debug only: also show Herdr/OpenCode panes Relay does not manage.
-        "show_unmanaged": False,
     },
     "kpi": {"exclude": ["README.md", "catalog.json", "notes/", "papers/", "summaries/", ".agent-status/"]},
     "extras": [],
@@ -275,7 +273,7 @@ def read_relay(db):
     workers = _sqlite_rows(db, workers_sql)
     runtimes = _sqlite_rows(
         db, "SELECT worker_id,generation,state,relay_owned,workspace_id,tab_id,pane_id,"
-            "runtime_id,session_id,created_at FROM worker_runtimes")
+            "runtime_id,session_id,created_at,cleanup_after FROM worker_runtimes")
     unread = _sqlite_rows(
         db, "SELECT recipient, COUNT(*) AS n FROM messages WHERE state IN ('queued','delivered') GROUP BY recipient")
     # Latest block reason per task (display only; no mutation).
@@ -351,8 +349,9 @@ def read_agents(cfg, root, extra_ws):
     tracked = _tracked_pane(root)
     if tracked:
         panes = [p for p in panes if p["pane_id"] != tracked]
-    if not cfg["herdr"].get("show_unmanaged", False):
-        panes = [p for p in panes if p["agent"] and p["agent"] != "-"]
+    # Relay-managed only: unmanaged panes are telemetry we do not render (they
+    # are not workers and must never create a WORKERS row).
+    panes = [p for p in panes if p["agent"] and p["agent"] != "-"]
     return panes
 
 
@@ -495,26 +494,28 @@ def collect(root, cfg, workspaces):
 
     task_by_id = {str(it["id"]): it for it in tree if it.get("id") is not None}
 
-    # ---- workers: Relay row is primary, Herdr is an overlay ------------------
-    latest = {}
+    # ---- workers: Relay worker is durable; its CURRENT runtime is disposable ---
+    # Worker and Runtime stay SEPARATE in the model (generation fencing, restart,
+    # cleanup all need the distinction). Only the presentation merges them: one
+    # row per durable worker, carrying its current runtime's generation/pane.
+    by_worker = {}
     for r in relay.get("runtimes") or []:
         wid = r.get("worker_id")
-        if not wid:
-            continue
-        k = (r.get("generation") or 0, r.get("created_at") or 0)
-        if wid not in latest or k > latest[wid][0]:
-            latest[wid] = (k, r)
+        if wid:
+            by_worker.setdefault(wid, []).append(r)
 
     workers = []
     for w in relay["workers"]:
         wid = w.get("id")
-        rt = latest.get(wid, (None, {}))[1]
-        pane = pane_by_id.get(rt.get("pane_id")) if rt.get("pane_id") else None
+        gen = w.get("generation")
+        rows = by_worker.get(wid, [])
+        # Current runtime = the row matching the worker's OWN generation. No
+        # fallback to "newest": a stale row must never be presented as current.
+        current = next((r for r in rows if r.get("generation") == gen), None) or {}
+        old = [r for r in rows if r is not current and r.get("state") not in (None, "cleaned")]
+        pane = pane_by_id.get(current.get("pane_id")) if current.get("pane_id") else None
         quiet_until = w.get("quiet_until")
-        quiet_active = bool(
-            quiet_until and quiet_until > now_ms and w.get("current_task_id")
-            and quiet_until is not None)
-        # relay quiet_task_id is not exposed here; the task pointer is the scope.
+        quiet_active = bool(quiet_until and quiet_until > now_ms and w.get("current_task_id"))
         exec_label = _exec_label(cfg, w, pane, quiet_until, quiet_active, now_ms)
         lp = w.get("last_progress_at") or 0
         workers.append({
@@ -522,19 +523,30 @@ def collect(root, cfg, workspaces):
             "role": w.get("role"),
             "state": w.get("state"),
             "task": w.get("current_task_id"),
-            "generation": w.get("generation"),
+            "generation": gen,
             "progress_ms": int(now_ms - lp) if lp else None,
             "quiet_until": quiet_until,
             "quiet_reason": w.get("quiet_reason"),
             "quiet_active": quiet_active,
             "exec": exec_label,
-            "pane": rt.get("pane_id"),
-            "runtime_id": rt.get("runtime_id"),
-            "workspace": rt.get("workspace_id"),
-            "tab": rt.get("tab_id"),
-            "runtime_state": rt.get("state"),
+            "pane": current.get("pane_id"),
+            "runtime_id": current.get("runtime_id"),
+            "workspace": current.get("workspace_id"),
+            "tab": current.get("tab_id"),
+            "runtime_state": current.get("state"),
+            "relay_owned": current.get("relay_owned"),
             "agent_status": (pane or {}).get("agent_status"),
             "unread": relay.get("unread", {}).get(wid, 0),
+            "old_runtimes": [{"generation": r.get("generation"), "state": r.get("state"),
+                              "pane_id": r.get("pane_id"), "relay_owned": r.get("relay_owned"),
+                              "cleanup_after": r.get("cleanup_after")} for r in old],
+            # Nested view for --json: the Worker/Runtime split is preserved.
+            "execution": {"state": exec_label, "pane_id": current.get("pane_id"),
+                          "agent_status": (pane or {}).get("agent_status")},
+            "runtime": {"generation": current.get("generation"), "state": current.get("state"),
+                        "relay_owned": current.get("relay_owned"),
+                        "runtime_id": current.get("runtime_id"),
+                        "pane_id": current.get("pane_id")},
         })
     workers.sort(key=lambda x: (x.get("id") or ""))
 
@@ -557,6 +569,15 @@ def collect(root, cfg, workspaces):
         if not w.get("pane"):
             attention.append({"kind": "worker", "id": w["id"],
                               "text": "supervised worker has no visible runtime pane"})
+        for r in w.get("old_runtimes", []):
+            # Only a RELAY-OWNED finished runtime is expected to be cleaned; an
+            # adopted (relay_owned=0) one is deliberately never closed. Flag only
+            # a relay-owned cleanup that is genuinely overdue.
+            ca = r.get("cleanup_after")
+            if (r.get("state") in ("stale", "dead") and r.get("relay_owned") == 1
+                    and ca is not None and ca <= now_ms):
+                attention.append({"kind": "worker", "id": w["id"],
+                                  "text": f"old runtime g{r.get('generation')} {r.get('state')}, cleanup overdue"})
     for it in tree:
         if it["state"] in ("queued",) and it.get("role") and it["role"] not in roles:
             attention.append({"kind": "task", "id": it["id"], "text": f"unclaimable role={it['role']}"})
@@ -568,24 +589,19 @@ def collect(root, cfg, workspaces):
         elif it["state"] == "failed":
             attention.append({"kind": "task", "id": it["id"], "text": "failed"})
 
-    # ---- runtimes (worker-centric) -------------------------------------------
+    # ---- runtimes: current per worker (flat, for --json compat) + full history ---
     runtimes = [{
-        "worker": w["id"], "generation": w["generation"], "pane": w.get("pane"),
+        "worker": w["id"], "generation": w["runtime"]["generation"], "pane": w.get("pane"),
         "runtime_id": w.get("runtime_id"), "workspace": w.get("workspace"), "tab": w.get("tab"),
-        "state": w.get("runtime_state"), "agent": "opencode" if w.get("pane") else None,
-        "agent_status": w.get("agent_status"),
+        "state": w.get("runtime_state"), "relay_owned": w.get("relay_owned"),
+        "agent": "opencode" if w.get("pane") else None, "agent_status": w.get("agent_status"),
     } for w in workers]
-    if cfg["herdr"].get("show_unmanaged", False) and agents:
-        mapped = {r["pane"] for r in runtimes if r.get("pane")}
-        for p in agents:
-            if p["pane_id"] in mapped:
-                continue
-            runtimes.append({
-                "worker": "-", "generation": None, "pane": p["pane_id"], "runtime_id": None,
-                "workspace": p.get("workspace_id"), "tab": p.get("tab_id"),
-                "state": None, "agent": p.get("agent"), "agent_status": p.get("agent_status"),
-                "unmanaged": True,
-            })
+    runtime_history = {}
+    for r in sorted(relay.get("runtimes") or [],
+                    key=lambda x: ((x.get("worker_id") or ""), (x.get("generation") or 0))):
+        runtime_history.setdefault(r.get("worker_id"), []).append({
+            "generation": r.get("generation"), "state": r.get("state"),
+            "pane_id": r.get("pane_id"), "relay_owned": r.get("relay_owned")})
 
     title = cfg.get("title") or Path(root).name
     return {
@@ -605,6 +621,7 @@ def collect(root, cfg, workspaces):
         "workers": workers,
         "attention": attention,
         "runtimes": runtimes,
+        "runtime_history": runtime_history,
     }
 
 
@@ -612,6 +629,8 @@ def _exec_label(cfg, w, pane, quiet_until, quiet_active, now_ms):
     """Herdr execution label; never conflated with Relay worker state."""
     if not cfg["herdr"].get("enabled", True) or os.environ.get("HERDR_ENV") != "1":
         return "unavailable"
+    if w.get("state") == "starting":
+        return "starting"  # runtime lifecycle: spawn/attach in flight
     if pane and pane.get("agent_status") == "working":
         return "busy"
     if quiet_active:
@@ -802,7 +821,7 @@ def _render_work(lines, tree, width, c):
     emit_group(roots, "", True)
 
 
-def render_text(data, use_color, links=False, width=120):
+def render_text(data, use_color, links=False, width=120, runtime_history=False):
     c = lambda t, name: color(t, name, use_color)  # noqa: E731
     lines = []
     k = data["kpi"]
@@ -845,17 +864,50 @@ def render_text(data, use_color, links=False, width=120):
     if not wk:
         lines.append(c("  (none)", "gray"))
     for w in wk:
-        state = color(f"{str(w['state']):<13}", WORKER_COLOR.get(w["state"]), use_color)
-        exec_plain = w["exec"]
-        exec_col = "green" if exec_plain == "busy" else ("red" if exec_plain == "!idle" else "cyan" if exec_plain.startswith("quiet") else "gray")
-        exec_txt = color(f"{exec_plain:<12}", exec_col, use_color)
-        task = str(w.get("task") or "-")
-        tail = f'progress {fmt_age(w.get("progress_ms"))}'
-        if w.get("quiet_active") and w.get("quiet_reason"):
-            tail = f'"{_trim(w["quiet_reason"], 40)}"'
-        lead = f"  {_trim(str(w['id']), 16):<16} {state} {exec_txt} {task:<5} "
-        if _dwidth(lead) + 4 <= width:
-            lines.append(lead + c(_trim(tail, max(1, width - _dwidth(lead))), "gray"))
+        if width >= 56:
+            id_w, st_w, ex_w = 16, 13, 12
+        else:
+            st_w, ex_w = 8, 8
+            id_w = max(8, min(16, width - (st_w + ex_w + 11)))
+        st = str(w["state"])
+        state_cell = c(f"{st[:st_w]:<{st_w}}", WORKER_COLOR.get(st))
+        e = w["exec"]
+        ecol = "green" if e == "busy" else ("red" if e == "!idle" else ("cyan" if e.startswith("quiet") else "gray"))
+        exec_cell = c(f"{e[:ex_w]:<{ex_w}}", ecol)
+        id_s = _trim(str(w["id"]), id_w)
+        task = _trim(str(w.get("task") or "-"), 5)
+        lead = f"  {id_s:<{id_w}} {state_cell} {exec_cell} {task:<5}"
+        # Visible width of `lead` (id/state/exec are padded to their column widths).
+        used = 2 + id_w + 1 + st_w + 1 + ex_w + 1 + 5
+        tail = ""
+        gen = w.get("generation")
+        gen_s = f"g{gen}" if gen is not None else "g-"
+        pane = w.get("pane")
+
+        def add(s, w_):
+            nonlocal used, tail
+            if used + w_ <= width:
+                tail += s
+                used += w_
+
+        if width >= 64:  # current runtime generation
+            add(f"  {gen_s:<4}", 6)
+        if width >= 72:  # current runtime pane (Ctrl+click)
+            if pane:
+                vis = f"{ANSI['underline']}{pane}{ANSI['reset']}" if links else pane
+                pad = " " * max(0, 9 - _dwidth(pane))
+                add("  " + link(vis, f"{PANE_LINK_BASE}{pane}", links) + pad, 2 + max(9, _dwidth(pane)))
+            else:
+                add("  " + c("no-pane", "yellow"), 9)
+        if not w.get("quiet_active"):  # progress age
+            add(f"  {fmt_age(w.get('progress_ms'))}", 2 + _dwidth(fmt_age(w.get("progress_ms"))))
+        if w.get("quiet_active") and w.get("quiet_reason") and width >= 90:
+            reason = f'  "{_trim(w["quiet_reason"], 30)}"'
+            if used + _dwidth(reason) <= width:
+                tail += reason
+        lines.append(lead + tail)
+    if links:
+        lines.append(color("  Ctrl+click a pane id → focus that pane", "dim", use_color))
 
     # ---- ATTENTION ----------------------------------------------------------
     lines.append("")
@@ -867,25 +919,15 @@ def render_text(data, use_color, links=False, width=120):
         age = f"  {a['age']}" if a.get("age") else ""
         lines.append(c(f"  ! {str(a['id']):<16} {a['text']}{age}", "red"))
 
-    # ---- RUNTIMES -----------------------------------------------------------
-    runtimes = data["runtimes"]
-    if runtimes and width >= 66:
+    # ---- RUNTIME HISTORY (opt-in; the default dashboard is worker-centric) ----
+    if runtime_history and data.get("runtime_history"):
         lines.append("")
-        lines.append(c("RUNTIMES", "bold"))
-        for r in runtimes:
-            pane = r.get("pane")
-            if pane:
-                vis = f"{ANSI['underline']}{pane}{ANSI['reset']}" if links else pane
-                pane_s = link(vis, f"{PANE_LINK_BASE}{pane}", links)
-            else:
-                pane_s = c("no-pane", "yellow")
-            gen = f"g{r.get('generation')}"
-            status = r.get("agent_status") or ("-" if not pane else "?")
-            line = (f"  {_trim(str(r['worker']), 16):<16} {gen:<4} {pane_s:<9} "
-                    f"{status}")
-            lines.append(line)
-        if links:
-            lines.append(color("  Ctrl+click a pane id → focus that pane", "dim", use_color))
+        lines.append(c("RUNTIME HISTORY", "bold"))
+        for wid, rows in data["runtime_history"].items():
+            lines.append("  " + c(_trim(str(wid), width - 2), "blue"))
+            for r in rows:
+                pane = r.get("pane_id") or "-"
+                lines.append(f"    g{str(r.get('generation')):<3} {str(r.get('state')):<8} {pane}")
 
     # ---- sources footer -----------------------------------------------------
     lines.append("")
@@ -938,7 +980,8 @@ def cmd_render(args, root, cfg):
     else:
         use_color = sys.stdout.isatty() or os.environ.get("FORCE_COLOR") == "1"
         links = use_color and bool(cfg["herdr"].get("links", True))
-        print(render_text(data, use_color, links, _term_width()))
+        print(render_text(data, use_color, links, _term_width(),
+                          runtime_history=getattr(args, "runtime_history", False)))
     return 0
 
 
@@ -958,7 +1001,8 @@ def cmd_watch(args, root, cfg):
                 print(err, file=sys.stderr)
             else:
                 data = collect(root, cfg, args.workspaces)
-                print(render_text(data, True, bool(cfg["herdr"].get("links", True)), _term_width()))
+                print(render_text(data, True, bool(cfg["herdr"].get("links", True)), _term_width(),
+                                  runtime_history=getattr(args, "runtime_history", False)))
             sys.stdout.flush()
             time.sleep(interval)
     except KeyboardInterrupt:
@@ -1052,13 +1096,17 @@ def cmd_doctor(args, root, cfg, cfg_path):
         return 2
     relay = read_relay(db)
     if relay:
-        lines.append(f"tasks         {len(relay['tasks'])}")
-        lines.append(f"workers       {len(relay['workers'])}")
-        lines.append(f"runtimes      {len(relay['runtimes'])}")
-        placed = {r.get("worker_id") for r in relay["runtimes"] if r.get("pane_id")}
         ids = [w.get("id") for w in relay["workers"]]
+        gens = {w.get("id"): w.get("generation") for w in relay["workers"]}
+        current = [r for r in relay["runtimes"] if gens.get(r.get("worker_id")) == r.get("generation")]
+        stale = [r for r in relay["runtimes"] if r.get("state") in ("stale", "dead")]
+        lines.append(f"tasks           {len(relay['tasks'])}")
+        lines.append(f"workers         {len(ids)}")
+        lines.append(f"current runtimes {len(current)}")
+        placed = {r.get("worker_id") for r in current if r.get("pane_id")}
         linked = sum(1 for i in ids if i in placed)
-        lines.append(f"runtime links {linked}/{len(ids)}")
+        lines.append(f"runtime links   {linked}/{len(ids)}")
+        lines.append(f"stale runtimes  {len(stale)}")
     sock = Path(db).parent / "relay.sock"
     lines.append(f"daemon/socket {'OK ' + str(sock) if sock.exists() else '(no socket)'}")
     agents = read_agents(cfg, root, args.workspaces)
@@ -1083,10 +1131,13 @@ def build_parser():
     p = sub.add_parser("render", help="print one snapshot (default)")
     common(p)
     p.add_argument("--json", action="store_true")
+    p.add_argument("--runtime-history", action="store_true", dest="runtime_history",
+                   help="also print every runtime generation per worker (default: current only)")
 
     p = sub.add_parser("watch", help="clear + redraw in a loop")
     common(p)
     p.add_argument("--interval", type=float, default=None)
+    p.add_argument("--runtime-history", action="store_true", dest="runtime_history")
 
     p = sub.add_parser("show", help="open a live dashboard pane next to a Herdr pane")
     common(p)
