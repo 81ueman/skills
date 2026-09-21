@@ -737,73 +737,69 @@ def _subtree_size(children, iid, seen=None):
 
 
 def _render_work(lines, tree, width, c):
-    """Render the task tree: active branches first, done folded into context."""
+    """Render the task tree with aligned id/state columns.
+
+    Left columns are fixed (id, state) so ids and titles line up across depths;
+    hierarchy is drawn with glyphs in the title column. Siblings show active
+    first, then finished ones (folded when there are many).
+    """
     if not tree:
         lines.append(c("  (none)", "gray"))
         return
     all_done, children = _all_done(tree)
     _, roots = _task_children(tree)
+    st_w = 15 if width >= 64 else 8
+    cols = 8 + 1 + st_w + 1  # id + sp + state + sp
 
-    def emit_node(it, depth):
+    def emit_node(it, prefix, branch, child_prefix):
         iid = str(it["id"])
         kids = children.get(iid, [])
-        indent = "  " * depth
+        st = it["state"]
+        st_short = st[:st_w]
+        tag = c(f"{st_short:<{st_w}}", TASK_COLOR.get(st))
+        tree_txt = prefix + branch
+        avail = width - cols - _dwidth(tree_txt)
         if kids and all_done.get(iid):
             total = 1 + _subtree_size(children, iid)
             suffix = f"  ({total}/{total} done)"
-            prefix = f"{indent}✓ {str(it['id']):<7} "
-            title = _trim(it["title"], max(4, width - _dwidth(prefix) - _dwidth(suffix)))
-            lines.append(c(f"{prefix}{title}{suffix}", "gray"))
+            title = "✓ " + _trim(it["title"], max(1, avail - _dwidth(suffix) - 2))
+            lines.append(c(f"{str(it['id']):<8} {tag} {tree_txt}{title}{suffix}", "gray"))
             return
-        st = it["state"]
-        tag_w = 8 if width < 44 else 15
-        if tag_w == 8:
-            st = st[:8]
-        display = f"{st:<{tag_w}}"
-        base = len(indent) + tag_w + 1 + 7 + 1
-        avail = width - base
         owner = it.get("assignee") or it.get("role") or "-"
-        role = ""
-        if it.get("role") and it.get("assignee"):
-            role = f"  role={it['role']}"
+        role = f"  role={it['role']}" if (it.get("role") and it.get("assignee")) else ""
+        tail = f"  [{owner}]" if owner else ""
         if avail - 8 < _dwidth(role):
             role = ""
-        tail = f"  [{owner}]" if owner else ""
         if avail - _dwidth(role) - 8 < _dwidth(tail):
             tail = ""
-        title_w = max(1, avail - _dwidth(role) - _dwidth(tail))
-        title = _trim(it["title"], title_w)
-        line = f"{indent}{c(display, TASK_COLOR.get(it['state']))} {str(it['id']):<7} {title}{role}{tail}"
-        lines.append(c(line, "dim") if it["state"] == "done" else line)
+        title = _trim(it["title"], max(1, avail - _dwidth(role) - _dwidth(tail)))
+        line = f"{str(it['id']):<8} {tag} {tree_txt}{title}{role}{tail}"
+        lines.append(c(line, "dim") if st == "done" else line)
         if kids:
-            emit_group(kids, depth + 1)
+            emit_group(kids, child_prefix, False)
 
-    def emit_group(nodes, depth):
-        i = 0
-        while i < len(nodes):
-            n = nodes[i]
-            foldable = n["state"] == "done" and not children.get(str(n["id"]))
-            if foldable:
-                j = i
-                while j < len(nodes):
-                    m = nodes[j]
-                    if m["state"] == "done" and not children.get(str(m["id"])):
-                        j += 1
-                    else:
-                        break
-                run = nodes[i:j]
-                if len(run) >= 4:
-                    emit_node(run[0], depth)
-                    lines.append(c("  " * depth + f"✓ … +{len(run) - 1} done", "gray"))
-                else:
-                    for x in run:
-                        emit_node(x, depth)
-                i = j
-            else:
-                emit_node(n, depth)
-                i += 1
+    def emit_group(nodes, prefix, top):
+        active = [n for n in nodes if n["state"] != "done"]
+        dones = sorted((n for n in nodes if n["state"] == "done"), key=lambda n: str(n["id"]))
+        items = list(active)
+        folded = None
+        if len(dones) <= 3:
+            items += dones
+        else:
+            # Many finished siblings: fold the whole group (subtree names are in
+            # `render --json`; the text view favours the active branches).
+            folded = sum(1 + _subtree_size(children, str(n["id"])) for n in dones)
+            items.append(None)
+        for i, n in enumerate(items):
+            is_last = i == len(items) - 1
+            branch = "" if top else ("└─ " if is_last else "├─ ")
+            child_prefix = prefix + ("" if top else ("   " if is_last else "│  "))
+            if n is None:
+                lines.append(c(f"{'':<8} {c('✓', 'gray'):<{st_w}} {prefix}{branch}{folded} done", "gray"))
+                continue
+            emit_node(n, prefix, branch, child_prefix)
 
-    emit_group(roots, 0)
+    emit_group(roots, "", True)
 
 
 def render_text(data, use_color, links=False, width=120):

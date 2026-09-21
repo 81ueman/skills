@@ -119,23 +119,25 @@ class TaskTree(Base):
         t1 = next(i for i, l in enumerate(lines) if "T1" in l)
         t2 = next(i for i, l in enumerate(lines) if "T2" in l)
         self.assertLess(t1, t2)
-        self.assertTrue(lines[t2].startswith("  "), "child is indented")
+        self.assertIn("─", lines[t2], "child carries a tree glyph")
+        # id/state columns are aligned across depths (fixed left columns).
+        self.assertTrue(lines[t2].startswith("T2"))
 
     def test_3_done_child_stays_in_the_tree(self):
         self.add_task("T1", "parent", state="running")
         self.add_task("T2", "child", state="done", parent="T1")
         out, _ = self.render()
         self.assertIn("T2", out)
-        lines = out.splitlines()
-        t2 = next(l for l in lines if "T2" in l)
-        self.assertTrue(t2.startswith("  "))
+        t2 = next(l for l in out.splitlines() if "T2" in l)
+        self.assertIn("─", t2)
 
     def test_4_fully_done_subtree_collapses(self):
         self.add_task("T1", "root", state="done")
         self.add_task("T2", "a", state="done", parent="T1")
         self.add_task("T3", "b", state="done", parent="T1")
         out, _ = self.render()
-        self.assertIn("✓ T1", out)
+        self.assertIn("T1", out)
+        self.assertIn("✓", out)
         self.assertIn("(3/3 done)", out)
         self.assertNotIn("T3", out)  # children folded away
 
