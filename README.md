@@ -13,7 +13,6 @@ skills/
   d2-diagrams/          D2（Terrastruct D2）で図を描くスキル
   diagram-tool-choice/  d2 と Mermaid のどちらを使うか判断する入口スキル
   mermaid-diagrams/     Mermaid で図を描くスキル
-  parallel-worktrees/   複数エージェントの再帰的な worktree 並列作業スキル
   skill-authoring/      新しいスキルを作成・追加する手順スキル
   voice-check/          音声入力の文字起こしを日本語として整形・確認するスキル
 ```
@@ -23,7 +22,6 @@ skills/
 | `diagram-tool-choice` | 図を描く前に d2 / Mermaid を判断軸の表で選び、対応するスキルへ誘導する |
 | `d2-diagrams` | d2 の CLI、レイアウトエンジン（dagre/elk/tala）、記法、テンプレート |
 | `mermaid-diagrams` | Mermaid の CLI（mmdc / mermaid-ascii）、記法、テンプレート |
-| `parallel-worktrees` | relay + herdr 前提で worktree を再帰的に切り、統合エージェントが subtree を merge する並列作業の型 |
 | `skill-authoring` | 新規スキル作成の手順（実体の置き場・frontmatter・APM 展開・commit/push） |
 | `voice-check` | 音声入力の崩れを検知し、自然な日本語に整えて実行前に確認する |
 
@@ -60,6 +58,7 @@ apm update -g
 | スキル | 実体 | 展開 |
 | --- | --- | --- |
 | `agent-worker` | `relay` リポジトリの `skills/agent-worker/` | `apm install -g --target agent-skills 81ueman/relay` |
+| `parallel-worktrees` | `relay` リポジトリの `skills/parallel-worktrees/` | `apm install -g --target agent-skills 81ueman/relay` |
 
 ## 外部からインストールしたスキルとの違い
 
