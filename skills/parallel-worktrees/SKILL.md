@@ -132,6 +132,33 @@ herdr worktree create --branch <child-lane> --base <parent-lane> --label <CHILD>
 - 統合エージェント: 子の branch を自分のレーンブランチへ統合 → combined gate → 自分の root を submit
 - Top-Level: レーンブランチを main へ merge（path-scoped、combined gate 実行）→ 人間へ program 単位で報告
 
+### 6.1 landing の直列化（構造的リスク）
+
+**問題**: 1 ブランチに複数 task の commit を載せ、そのうち 1 つがまだ in-flight だと、
+done になった他の task の commit が「ブランチ全体をマージできない」ため landing されず滞留する。
+完了したのに成果が main に入らない、という見えにくい直列化。
+
+**これは worktree のトポロジ問題ではない。** 本質は **branch 粒度と landing 規律**の問題で、
+「worktree をさらに切れば自動的に直る」類ではない。worktree を 1 worker 1 本に切ると
+結果的に 1 task 1 branch になりやすい、というだけ。逆に、worktree を切っていても
+1 branch に複数 task を載せれば同じ滞留が起きる（実際 perf/bgp で起きた）。
+
+**根因**: 1 branch = 複数 task。→ 対策は branch 粒度を task に合わせること。
+
+**対策（worker 側）**:
+- 「完了した task」と「進行中 task」は**別ブランチに分ける**。1 branch 1 task が原則。
+- 完了したら即 `relay submit` して、統合エージェントが拾える状態にする。
+- どうしても同一ブランチに載るなら、完了 task の commit を先頭にまとめ、in-flight の commit と混ぜない。
+
+**対策（統合エージェント側・救済）**:
+- 既に branch が混ざっている場合、done task の commit を in-flight とは**独立に cherry-pick で landing**:
+  `git cherry-pick -x <sha> [<sha>...]`（`-x` で出所を記録）。
+- まず衝突しにくいもの（docs / bench / 独立ファイル）から入れる。production code は gate を通してから。
+- cherry-pick 後も branch は in-flight task のために残す（force push しない）。
+
+**検出**: 統合エージェントは定期的に各レーンブランチの
+`git log --oneline main..<branch>` を確認し、**state=done の task に対応する commit が未マージで滞留していないか**を見る。
+
 ## 並列化の判断
 
 ```
@@ -188,4 +215,6 @@ relay status
 - [ ] 統合エージェントへ責任範囲・merge 分担・並列化指示を durable で渡した
 - [ ] 子 task を `--depends-on` の DAG で並列投入した
 - [ ] 統合エージェントが自分の subtree を merge し、Top-Level が main へ merge する分担になっている
+- [ ] **1 branch 1 task**（完了 task と in-flight task を同一 branch に混ぜていない）
+- [ ] 各レーンブランチで **done task の commit が滞留していない**（`git log main..<branch>` で確認）
 - [ ] daemon は 1 つ、commit は path-scoped
